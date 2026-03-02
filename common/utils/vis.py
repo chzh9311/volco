@@ -266,8 +266,69 @@ def extract_masked_mesh_components(hand_verts, hand_faces, vertex_mask, part_ids
 
     return geometries
 
+def geom_to_img_o3d(vis_geoms, w, h, scale=1, concat_axis=1):
+    """
+    Render a list of Open3D geometries to an image by opening an O3D window,
+    setting the camera to each of 4 evenly-spaced azimuth views, capturing a
+    screenshot, then closing. The 4 images are concatenated along concat_axis.
 
-def geom_to_img(vis_geoms, w, h, scale=0.07, half_range=None, point_size=20):
+    vis_geoms: list of o3d geometry objects or dicts with key 'geometry'
+    Returns: float32 numpy array in [0, 1], shape (H, W*4, 3) or (H*4, W, 3)
+    """
+    # Unwrap dicts the same way geom_to_img does
+    raw_geoms = []
+    for g in vis_geoms:
+        raw_geoms.append(g['geometry'] if isinstance(g, dict) else g)
+
+    # Camera azimuths matching geom_to_img: angle = pi*i/2 + pi/6
+    elev = 30.0
+    azimuths = [np.degrees(np.pi * i / 2 + np.pi / 6) for i in range(4)]
+
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(visible=True, width=w, height=h)
+
+    for g in raw_geoms:
+        vis.add_geometry(g)
+
+    opt = vis.get_render_option()
+    opt.background_color = np.array([1.0, 1.0, 1.0])
+    opt.light_on = True
+
+    # First poll lets O3D initialise the scene and run its internal reset_view_point
+    vis.poll_events()
+    vis.update_renderer()
+
+    result_imgs = []
+    for azim in azimuths:
+        elev_rad = np.radians(elev)
+        azim_rad = np.radians(azim)
+        front = np.array([
+            np.cos(elev_rad) * np.cos(azim_rad),
+            np.sin(elev_rad),
+            np.cos(elev_rad) * np.sin(azim_rad),
+        ])
+
+        ctr = vis.get_view_control()
+        ctr.set_front(front.tolist())
+        ctr.set_up([0.0, 1.0, 0.0])
+        ctr.set_lookat([0.0, 0.0, 0.0])
+        ctr.set_zoom(scale)
+
+        # Two render cycles: first applies the camera, second stabilises it
+        vis.poll_events()
+        vis.update_renderer()
+        vis.poll_events()
+        vis.update_renderer()
+
+        img = vis.capture_screen_float_buffer(do_render=True)
+        result_imgs.append(np.asarray(img).copy())  # copy before next camera change
+
+    vis.destroy_window()
+
+    return np.concatenate(result_imgs, axis=concat_axis)
+
+
+def geom_to_img(vis_geoms, w, h, scale=0.07, half_range=None, concat_axis=1):
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
     import matplotlib
     matplotlib.use('Agg')  # Use non-interactive backend
@@ -424,7 +485,7 @@ def geom_to_img(vis_geoms, w, h, scale=0.07, half_range=None, point_size=20):
 
         plt.close(fig)
 
-    ret_img = np.concatenate(result_imgs, axis=1)
+    ret_img = np.concatenate(result_imgs, axis=concat_axis)
     return ret_img
 
 
@@ -874,7 +935,8 @@ def create_bbox_geomtries(msdf_center, grid_scale, contact=None, alpha=0.3):
     return bbox_geometries
 
 
-def visualize_recon_hand_w_object(hand_verts, hand_verts_mask, hand_faces, obj_mesh, part_ids, msdf_center=None, grid_scale=None, h=500, w=500):
+def visualize_recon_hand_w_object(hand_verts, hand_verts_mask, hand_faces, obj_mesh, part_ids, msdf_center=None, grid_scale=None, h=500, w=500,
+                                  concat_axis=1):
     masked_hand_geometries = extract_masked_mesh_components(
         hand_verts=hand_verts,
         hand_faces=hand_faces,
@@ -887,7 +949,7 @@ def visualize_recon_hand_w_object(hand_verts, hand_verts_mask, hand_faces, obj_m
     # bbox_geometries = create_bbox_geomtries(msdf_center, grid_scale)
 
     vis_geoms = masked_hand_geometries + [obj_o3d_mesh] # + bbox_geometries
-    img = geom_to_img(vis_geoms, w=w, h=h, scale=0.5, half_range=0.12)
+    img = geom_to_img_o3d(vis_geoms, w=w, h=h, scale=0.9, concat_axis=concat_axis)
     return img, vis_geoms
 
 

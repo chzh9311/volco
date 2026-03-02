@@ -11,7 +11,8 @@ from matplotlib import pyplot as plt
 from common.manopth.manopth.manolayer import ManoLayer
 from common.utils.physics import StableLoss
 from common.utils.vis import (parse_hex_color, o3dmesh_from_trimesh, o3d_arrow, geom_to_img, extract_masked_mesh_components,
-                               visualize_grid_contact, visualize_local_grid_with_hand, visualize_recon_hand_w_object)
+                               visualize_grid_contact, visualize_local_grid_with_hand, visualize_recon_hand_w_object,
+                               geom_to_img_o3d)
 from common.utils.misc import linear_normalize
 from common.utils.geometry import (
         flip_x_axis,
@@ -1033,10 +1034,10 @@ class HandObject:
         """
         vis_geoms = self.get_vis_geoms(idx, draw_maps=draw_maps, **kwargs)
 
-        scale = 0.5
+        scale = 0.9
         # Separate geometries into three groups
         hand_obj_geoms = [g for g in vis_geoms if g['name'] in ['hand', 'object']]
-        img_hand_obj = geom_to_img(hand_obj_geoms, w, h, scale=scale)
+        img_hand_obj = geom_to_img_o3d(hand_obj_geoms, w, h, scale=scale, concat_axis=kwargs.get('concat_axis', 1))
 
         if draw_maps:
             contact_geoms = [g for g in vis_geoms if g['name'] == 'obj_contacts']
