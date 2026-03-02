@@ -68,7 +68,10 @@ def main(cfg):
 
     # Use DDPStrategy with static_graph=True to handle frozen parameters without memory overhead
     # This is optimal when model has frozen weights (e.g., pretrained autoencoder)
-    if cfg.trainer.get('devices', 1) > 1 and cfg.trainer.get('accelerator') == 'gpu':
+    devices = cfg.trainer.get('devices', 1)
+    if type(devices) is not int:
+        devices = len(devices)
+    if devices > 1 and cfg.trainer.get('accelerator') == 'gpu':
         strategy = DDPStrategy(static_graph=True)
         trainer = L.Trainer(**cfg.trainer, strategy=strategy, inference_mode=inference_mode, logger=logger, callbacks=[checkpoint_callback])
     else:

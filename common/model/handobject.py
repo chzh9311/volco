@@ -316,14 +316,14 @@ class HandObject:
 
         elif self.contact_unit == 'point':
         ## Calculate contacts
-            # self.obj_verts = []
-            # self.obj_normals = []
-            # for obj_mesh in self.obj_models:
-            #     points, fidx = trimesh.sample.sample_surface(obj_mesh, self.cfg.msdf.kernel_size ** 3 * self.cfg.msdf.num_grids)
-            #     self.obj_verts.append(points)
-            #     self.obj_normals.append(obj_mesh.face_normals[fidx])
-            # self.obj_verts = torch.as_tensor(np.stack(self.obj_verts, axis=0), dtype=torch.float32, device=self.device)  # (B, N*K^3, 3)
-            # self.obj_normals = torch.as_tensor(np.stack(self.obj_normals, axis=0), dtype=torch.float32, device=self.device)  # (B, N*K^3, 3)
+            self.obj_verts = []
+            self.obj_normals = []
+            for obj_mesh in self.obj_models:
+                points, fidx = trimesh.sample.sample_surface(obj_mesh, self.cfg.msdf.kernel_size ** 3 * self.cfg.msdf.num_grids)
+                self.obj_verts.append(points)
+                self.obj_normals.append(obj_mesh.face_normals[fidx])
+            self.obj_verts = torch.as_tensor(np.stack(self.obj_verts, axis=0), dtype=torch.float32, device=self.device)  # (B, N*K^3, 3)
+            self.obj_normals = torch.as_tensor(np.stack(self.obj_normals, axis=0), dtype=torch.float32, device=self.device)  # (B, N*K^3, 3)
             grid_dist_to_contact = GridDistanceToContact(**self.cfg.point_contact)
 
             if self.correspondence_type == 'part':

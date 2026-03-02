@@ -318,6 +318,12 @@ def optimize_pose_wrt_local_grids(mano_layer, grid_centers, target_pts, target_W
         # Contact loss: weighted MSE between predicted and target points
         losses['contact'] = torch.mean(weights.unsqueeze(-1) * F.mse_loss(target_W_verts @ handV, target_pts, reduction='none')) * 10000
 
+        ## version 2: based on vertex-wise distance loss:
+        # weightedW = weights.unsqueeze(-1) * target_W_verts
+        # vertex_contact = torch.sum(weightedW, dim=1)
+        # recon_V = weightedW.transpose(-1, -2) @ target_pts
+        # losses['contact'] = F.mse_loss(recon_V, vertex_contact.unsqueeze(-1) * handV, reduction='mean') * 10
+
         # Repulsive loss: penalize hand vertices near non-contact grids
         # grid_dist = torch.cdist(grid_centers, handV)  # B x num_grids x num_hand_verts
         if w_repulsive > 0:

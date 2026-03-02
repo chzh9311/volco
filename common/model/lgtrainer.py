@@ -1,4 +1,5 @@
 import torch
+import os
 import torch.nn as nn
 import torch.nn.functional as F
 import lightning as L
@@ -7,12 +8,13 @@ import open3d as o3d
 import numpy as np
 import matplotlib.pyplot as plt
 
+from tqdm import tqdm
 from common.manopth.manopth.manolayer import ManoLayer
 from common.model.losses import kl_div_normal, masked_rec_loss
 from common.model.handobject import recover_hand_verts_from_contact
 from common.model.handobject import HandObject, recover_hand_verts_from_contact
 from common.model.hand_cse.hand_cse import HandCSE
-from common.utils.vis import o3dmesh_from_trimesh, visualize_local_grid_with_hand, geom_to_img, extract_masked_mesh_components
+from common.utils.vis import o3dmesh, o3dmesh_from_trimesh, visualize_local_grid_with_hand, geom_to_img, extract_masked_mesh_components, clip_mesh_to_aabb
 from common.model.losses import masked_rec_loss
 from common.msdf.utils.msdf import get_grid
 
@@ -105,7 +107,8 @@ class LGTrainer(L.LightningModule):
                 )
             gt_geoms = self.visualize_grid_and_hand(
                 grid_coords=self.grid_coords.view(-1, 3),
-                grid_contact=gt_grid_contact[..., 0].reshape(batch_size, -1),
+                # grid_contact=gt_grid_contact[..., 0].reshape(batch_size, -1),
+                grid_contact=(grid_sdf.view(batch_size, -1) + 0.5) / 2,
                 pred_hand_verts=batch['nHandVerts'],
                 hand_faces=self.mano_layer.th_faces,
                 pred_mask=batch['handVertMask'],
@@ -114,7 +117,8 @@ class LGTrainer(L.LightningModule):
             )
             pred_geoms = self.visualize_grid_and_hand(
                 grid_coords=self.grid_coords.view(-1, 3),
-                grid_contact=pred_grid_contact[..., 0].reshape(batch_size, -1),
+                # grid_contact=pred_grid_contact[..., 0].reshape(batch_size, -1),
+                grid_contact=(grid_sdf.view(batch_size, -1) + 0.5) / 2,
                 pred_hand_verts=pred_hand_verts,
                 hand_faces=self.mano_layer.th_faces,
                 pred_mask=batch['handVertMask'],
@@ -197,39 +201,175 @@ class LGTrainer(L.LightningModule):
         pred_rec_error = masked_rec_loss(pred_hand_verts, batch['nHandVerts'], gt_rec_verts_mask) * 1000
         loss_dict = {'test/gt_rec_error': gt_rec_error.item(),
                      'test/pred_rec_error': pred_rec_error.item()}
+
+        if batch_idx % self.cfg.test.vis_every_n_batches == 0:
+            # Build local_grid (K,K,K,C) for sample 0 to extract the bbox lineset
+            # vis_idx = 0
+            for vis_idx in tqdm(range(batch_size)):
+                contact_point_np = batch['objSamplePt'][vis_idx].detach().cpu().numpy()
+
+                # Hand mesh
+                hand_verts_np = batch['nHandVerts'][vis_idx].detach().cpu().numpy() + contact_point_np[np.newaxis, :]
+                hand_faces_np = self.mano_layer.th_faces.cpu().numpy()
+                hand_mesh = o3dmesh(vert=hand_verts_np, face=hand_faces_np, color=[0xF2/255, 0x71/255, 0x41/255])
+
+                # Object mesh
+                obj_rot = batch['objRot'][vis_idx].cpu().numpy()
+                if obj_rot.shape == (3,):
+                    from pytorch3d.transforms import axis_angle_to_matrix
+                    objR = axis_angle_to_matrix(torch.from_numpy(obj_rot)).numpy()
+                    objR = objR.T
+                else:
+                    objR = obj_rot
+                obj_trans = batch['objTrans'][vis_idx].cpu().numpy()
+                obj_name = batch['obj_name'][vis_idx]
+                simp_obj_mesh = getattr(self.trainer.datamodule, 'test_set').simp_obj_mesh
+                obj_mesh_data = simp_obj_mesh[obj_name]
+                obj_verts = (objR @ obj_mesh_data['verts'].T).T + obj_trans[np.newaxis, :]
+                obj_mesh = o3dmesh(vert=obj_verts, face=obj_mesh_data['faces'], color=[0.7, 0.7, 0.7])
+
+                # Bounding box lineset
+                gs = self.cfg.msdf.scale
+                bbox_corners = np.array([contact_point_np + gs * np.array([sx, sy, sz])
+                                        for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)])
+                bbox_lines = [[0,1],[2,3],[4,5],[6,7],[0,2],[1,3],[4,6],[5,7],[0,4],[1,5],[2,6],[3,7]]
+                bbox_ls = o3d.geometry.LineSet()
+                bbox_ls.points = o3d.utility.Vector3dVector(bbox_corners)
+                bbox_ls.lines = o3d.utility.Vector2iVector(bbox_lines)
+                bbox_ls.paint_uniform_color([0.0, 1.0, 0.0])
+
+                lg_geoms = [
+                    {'geometry': hand_mesh, 'alpha': 0.3},
+                    {'geometry': obj_mesh, 'alpha': 0.3},
+                    bbox_ls,
+                ]
+
+                gt_geoms = self.visualize_grid_and_hand(
+                    grid_coords=self.grid_coords.view(-1, 3),
+                    # grid_contact=gt_grid_contact[..., 0].reshape(batch_size, -1),
+                    grid_contact=(grid_sdf.view(batch_size, -1) + 0.5) / 2,
+                    pred_hand_verts=batch['nHandVerts'],
+                    hand_faces=self.mano_layer.th_faces,
+                    pred_mask=batch['handVertMask'],
+                    part_ids=self.hand_part_ids,
+                    batch_idx=vis_idx
+                )
+                cropped_obj = clip_mesh_to_aabb(
+                    obj_mesh,
+                    min_bound=contact_point_np - gs,
+                    max_bound=contact_point_np + gs,
+                    color=[0.7, 0.7, 0.7],
+                )
+                cropped_obj.translate(-contact_point_np)
+
+                pred_geoms = self.visualize_grid_and_hand(
+                    grid_coords=self.grid_coords.view(-1, 3),
+                    # grid_contact=recon_cgrid[..., 0].reshape(batch_size, -1),
+                    grid_contact=(grid_sdf.view(batch_size, -1) + 0.5) / 2,
+                    pred_hand_verts=pred_hand_verts,
+                    hand_faces=self.mano_layer.th_faces,
+                    pred_mask=batch['handVertMask'],
+                    gt_mask=batch['handVertMask'],
+                    gt_hand_verts=batch['nHandVerts'],
+                    part_ids=self.hand_part_ids,
+                    batch_idx=vis_idx
+                )
+                # --- Random sampling: Option D + accumulated contact ---
+                n_rand = 128
+                obj_cond_single = [c[vis_idx:vis_idx+1].expand(n_rand, *c.shape[1:]) for c in obj_cond]  # (1, ...) -> (N, ...)
+                rand_zs = torch.randn(n_rand, *posterior.mode().shape[1:], device=self.device)
+                rand_grids = self.model.decode(
+                    rand_zs, obj_cond=obj_cond_single
+                ).permute(0, 2, 3, 4, 1)  # (N, K, K, K, C)
+
+                # Accumulated contact: sum contact values across samples, normalize to [0,1]
+                acc_contact = rand_grids[..., 0].sum(dim=0).reshape(-1)  # (K^3,)
+                acc_contact_np = acc_contact.detach().cpu().numpy()
+                acc_contact_np = (acc_contact_np - acc_contact_np.min()) / (acc_contact_np.max() - acc_contact_np.min() + 1e-8)
+                grid_coords_np = self.grid_coords.view(-1, 3).detach().cpu().numpy()
+                acc_pcd = o3d.geometry.PointCloud()
+                acc_pcd.points = o3d.utility.Vector3dVector(grid_coords_np)
+                cmap_inferno = plt.get_cmap('plasma')
+                acc_pcd.colors = o3d.utility.Vector3dVector(cmap_inferno(acc_contact_np)[:, :3])
+                acc_point_sizes = acc_contact_np * 180 + 20  # scale: [2, 42]
+                # acc_geoms = [acc_pcd]
+                # acc_img = geom_to_img(acc_geoms, w=400, h=400)
+
+                # Option D: overlay N transparent reconstructed hand meshes
+                hand_faces_np = self.mano_layer.th_faces.cpu().numpy()
+                sdf_vals_np = ((grid_sdf[vis_idx].reshape(-1) + 0.5) / 2).clamp(0, 1).detach().cpu().numpy()
+                sdf_pcd = o3d.geometry.PointCloud()
+                sdf_pcd.points = o3d.utility.Vector3dVector(grid_coords_np)
+                sdf_pcd.colors = o3d.utility.Vector3dVector(plt.get_cmap('coolwarm')(sdf_vals_np)[:, :3])
+                # sample_geoms = [sdf_pcd]
+                sample_geoms = [{'geometry': acc_pcd, 'point_sizes': acc_point_sizes}]
+                img_side = 800
+                # with torch.no_grad():
+                #     for si in range(n_rand):
+                #         s_grid = rand_grids[si]  # (K, K, K, C)
+                #         s_verts, s_mask = recover_hand_verts_from_contact(
+                #             self.handcse, None,
+                #             s_grid[..., 0].reshape(1, -1),
+                #             s_grid[..., 1:].reshape(1, -1, s_grid.shape[-1] - 1),
+                #             grid_coords=self.grid_coords.view(1, -1, 3),
+                #         )
+                #         s_verts_np = s_verts[0].detach().cpu().numpy()
+                #         s_mask_np = s_mask[0].detach().cpu().numpy()
+                #         s_mesh_geoms = extract_masked_mesh_components(
+                #             s_verts_np, hand_faces_np, s_mask_np, part_ids=self.hand_part_ids,
+                #             create_geometries=True, uniform_color=[0xF2/255, 0x71/255, 0x41/255],
+                #         )
+                #         sample_geoms.extend([{'geometry': g, 'alpha': 0.1} for g in s_mesh_geoms
+                #                              if isinstance(g, o3d.geometry.TriangleMesh)])
+                sample_img = geom_to_img(sample_geoms + [cropped_obj], w=img_side, h=img_side, half_range=0.01)
         
-        ## Test random sampling from latent space
-        # random_z = torch.randn_like(posterior.mode())
-        # random_recon_cgrid = self.model.decode(random_z, obj_cond=obj_cond)
-        # random_c = random_recon_cgrid[:, 0].reshape(batch_size, -1)
-        # contact_value = random_c.max(dim=-1).values
-        # loss_dict.update({
-        #     'test/avg_contact_values': contact_value.mean().item(),
-        #     'test/contact_ratio': (contact_value > 0.05).float().mean().item(),
-        #     'test/in_ratio': (contact_value > 0.5).float().mean().item()
-        # })
+                os.makedirs('tmp', exist_ok=True)
+                gt_img = geom_to_img(gt_geoms, w=img_side, h=img_side)
+                pred_img = geom_to_img(pred_geoms, w=img_side, h=img_side)
+                img = np.concatenate([gt_img, pred_img], axis=0)
+                lg_img = geom_to_img(lg_geoms, w=img_side, h=img_side, scale=0.6)
+                plt.imsave(f'tmp/local_grid_{batch_idx*batch_size + vis_idx:04d}.png', img)
+                plt.imsave(f'tmp/hand_object_{batch_idx*batch_size + vis_idx:04d}.png', lg_img)
+                plt.imsave(f'tmp/sample_overlay_{batch_idx*batch_size + vis_idx:04d}.png', sample_img)
+                # plt.imsave(f'tmp/acc_contact_{batch_idx:04d}.png', acc_img)
+                # if self.debug:
+                #     all_geoms = gt_geoms + [g.translate((self.cfg.msdf.scale * 3, 0, 0)) for g in pred_geoms]
+                #     o3d.visualization.draw_geometries(all_geoms, window_name='test Local Grid Visualization')
+                #     o3d.visualization.draw_geometries(lg_geoms, window_name='test Hand/Object/BBox Visualization')
+                # else:
+            
+            ## Test random sampling from latent space
+            # random_z = torch.randn_like(posterior.mode())
+            # random_recon_cgrid = self.model.decode(random_z, obj_cond=obj_cond)
+            # random_c = random_recon_cgrid[:, 0].reshape(batch_size, -1)
+            # contact_value = random_c.max(dim=-1).values
+            # loss_dict.update({
+            #     'test/avg_contact_values': contact_value.mean().item(),
+            #     'test/contact_ratio': (contact_value > 0.05).float().mean().item(),
+            #     'test/in_ratio': (contact_value > 0.5).float().mean().item()
+            # })
 
-        ## Test zero-contact grid reconstruction
-        gt_grid_contact[..., 0] = 0.0
-        gt_grid_contact[:] = 0
-        recon_cgrid, posterior, obj_feat = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
-        zero_center = posterior.mode()
-        random_z = torch.randn_like(zero_center) * 0.1 + zero_center
-        random_recon_cgrid = self.model.decode(random_z, obj_cond=obj_cond)
-        random_c = random_recon_cgrid[:, 0].reshape(batch_size, -1)
-        contact_value = random_c.max(dim=-1).values
-        loss_dict.update({
-            'test/avg_contact_values': contact_value.mean().item(),
-            'test/contact_ratio': (contact_value > 0.05).float().mean().item(),
-            'test/in_ratio': (contact_value > 0.5).float().mean().item()
-        })
-        # recon_cgrid = recon_cgrid.permute(0, 2, 3, 4, 1)
-        # zero_contact_rec_error = F.l1_loss(recon_cgrid[..., 0], gt_grid_contact[..., 0])
-        # loss_dict['test/zero_contact_rec_error'] = zero_contact_rec_error
-        # loss_dict['test/zero_contact_rec_max'] = torch.max(torch.abs(recon_cgrid[..., 0]))
-        print(loss_dict)
+            ## Test zero-contact grid reconstruction
+            # gt_grid_contact[..., 0] = 0.0
+            # gt_grid_contact[:] = 0
+            # recon_cgrid, posterior, obj_feat = self.model(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
+            # zero_center = posterior.mode()
+            random_z = torch.randn_like(posterior.mode())
+            random_recon_cgrid = self.model.decode(random_z, obj_cond=obj_cond)
+            random_c = random_recon_cgrid[:, 0].reshape(batch_size, -1)
+            contact_value = random_c.max(dim=-1).values
+            loss_dict.update({
+                'test/avg_contact_values': contact_value.mean().item(),
+                'test/contact_ratio': (contact_value > 0.05).float().mean().item(),
+                'test/in_ratio': (contact_value > 0.5).float().mean().item()
+            })
+            # recon_cgrid = recon_cgrid.permute(0, 2, 3, 4, 1)
+            # zero_contact_rec_error = F.l1_loss(recon_cgrid[..., 0], gt_grid_contact[..., 0])
+            # loss_dict['test/zero_contact_rec_error'] = zero_contact_rec_error
+            # loss_dict['test/zero_contact_rec_max'] = torch.max(torch.abs(recon_cgrid[..., 0]))
+            print(loss_dict)
 
-        self.log_dict(loss_dict, prog_bar=True, on_step=False, on_epoch=True)
+            self.log_dict(loss_dict, prog_bar=True, on_step=False, on_epoch=True)
 
         ## GT visualization
         # vis_idx = 0
@@ -327,7 +467,8 @@ class LGTrainer(L.LightningModule):
         grid_pcd.points = o3d.utility.Vector3dVector(grid_coords_np)
 
         # Apply inferno colormap to contact values
-        cmap = plt.get_cmap('inferno')
+        # cmap = plt.get_cmap('inferno')
+        cmap = plt.get_cmap('coolwarm')
         grid_colors = np.array([cmap(val)[:3] for val in grid_contact_np])
         grid_pcd.colors = o3d.utility.Vector3dVector(grid_colors)
         geometries.append(grid_pcd)
@@ -335,7 +476,7 @@ class LGTrainer(L.LightningModule):
         # 2. Create predicted masked hand mesh and isolated vertices
         pred_geometries = extract_masked_mesh_components(
             pred_hand_verts_np, hand_faces_np, pred_mask_np, part_ids=part_ids,
-            create_geometries=True,
+            create_geometries=True, uniform_color=[0xF2/255, 0x71/255, 0x41/255],
         )
         geometries.extend(pred_geometries)
 
@@ -355,7 +496,7 @@ class LGTrainer(L.LightningModule):
             # Create GT masked hand mesh and isolated vertices
             gt_geometries = extract_masked_mesh_components(
                 gt_hand_verts_np, hand_faces_np, gt_mask_np, part_ids=part_ids,
-                create_geometries=True,
+                create_geometries=True, uniform_color=[0x2A/255, 0x5E/255, 0x8C/255],
             )
             geometries.extend(gt_geometries)
 

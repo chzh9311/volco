@@ -203,7 +203,7 @@ class LGCDiffTrainer(L.LightningModule):
         # obj_templates = [trimesh.Trimesh(simp_obj_mesh[name]['verts'], simp_obj_mesh[name]['faces'])
         #                  for name in obj_names]
         handobject = HandObject(self.cfg.data, self.device, mano_layer=self.mano_layer)
-        handobject.load_from_batch(batch, pool=self.pool)
+        handobject.load_from_batch(batch)
         lg_contact = handobject.ml_contact
         batch_size, n_grids = lg_contact.shape[:2]
         obj_msdf = handobject.obj_msdf[:, :, :self.msdf_k**3].view(-1, 1, self.msdf_k, self.msdf_k, self.msdf_k)
@@ -214,7 +214,8 @@ class LGCDiffTrainer(L.LightningModule):
         flat_lg_contact = rearrange(lg_contact, 'b n k1 k2 k3 c -> b n (k1 k2 k3) c')
         lg_contact = rearrange(lg_contact, 'b n k1 k2 k3 c -> (b n) c k1 k2 k3')
         posterior, obj_feat, multi_scale_obj_cond = self.grid_ae.encode(lg_contact, obj_msdf)
-        obj_pc = torch.cat([obj_msdf_center, obj_feat.view(batch_size, n_grids, -1)], dim=-1)
+        # obj_pc = torch.cat([obj_msdf_center, obj_feat.view(batch_size, n_grids, -1)], dim=-1)
+        obj_pc = handobject.obj_msdf
         # z = torch.cat([n_ho_dist.unsqueeze(-1), posterior.sample().view(batch_size, n_grids, -1)], dim=-1) # n_dim + 1
         z = posterior.sample().view(batch_size, n_grids, -1) # n_dim
 
@@ -247,7 +248,7 @@ class LGCDiffTrainer(L.LightningModule):
         sdf_flat = sdf_flat * self.msdf_scale * np.sqrt(3)
         ## Assume gravity direction is always (0, 0, -1), since there're some tolerance for penetration error.
         lgc = recon_lg_contact[..., 0]  # B x N*K^3
-        lgc = torch.where(lgc < 0.03, torch.zeros_like(lgc), lgc)
+        lgc = torch.where(lgc < 0.05, torch.zeros_like(lgc), lgc)
 
         stable_loss = self.stable_loss(sdf_flat, all_pts.view(batch_size, -1, 3), lgc, sdf_grad, n_adj_pt,
                                 obj_mass=handobject.obj_mass, gravity_direction=torch.FloatTensor([[0, 0, -1]]).to(self.device),
@@ -521,7 +522,8 @@ class LGCDiffTrainer(L.LightningModule):
             obj_msdf = handobject.obj_msdf[:, :, :self.msdf_k**3].view(-1, 1, self.msdf_k, self.msdf_k, self.msdf_k) # N x ...
             obj_msdf_center = handobject.obj_msdf[:, :, self.msdf_k**3:] # N x 3
             obj_feat, multi_scale_obj_cond = self.grid_ae.encode_object(obj_msdf)
-            obj_pc = torch.cat([obj_msdf_center, obj_feat.unsqueeze(0)], dim=-1)
+            # obj_pc = torch.cat([obj_msdf_center, obj_feat.unsqueeze(0)], dim=-1)
+            obj_pc = handobject.obj_msdf
 
             ## 'x' only indicates the latent shape; latents are sampled inside the model
             input_data = {'x': torch.randn(n_samples, n_grids, self.cfg.ae.feat_dim, device=self.device), 'obj_pc': obj_pc.permute(0, 2, 1).to(self.device), 'obj_msdf': obj_msdf}

@@ -1,0 +1,33 @@
+dataset_name: ho3d
+mano_root: data/misc/mano_v1_2/models
+dataset_path: data/ho3d
+obj_model_path: data/ycb_objects
+hand_cse_dim: 4
+hand_cse_path: common/model/hand_cse/hand_cse_${data.hand_cse_dim}.ckpt
+preprocessed_dir: data/preprocessed
+MSDF_dir: data/preprocessed/ho3d_msdf
+augment: ${train.augment}
+load_msdf: true
+load_grid_contact: false
+
+contact_unit: ${contact_unit}
+downsample_rate: 
+  train: 1
+  val: 1
+  test: 1
+
+msdf:
+  num_grids: ${msdf.num_grids}
+  kernel_size: ${msdf.kernel_size}
+  scale: ${msdf.scale}
+  contact_method: ${msdf.contact_method}
+
+point_contact: ## Only for ablation using point contact
+  scale: 0.001
+  kernel_size: 2
+  method: 1
+
+object_sample: 1024
+
+num_workers: 8
+test_samples: ${test.n_samples}

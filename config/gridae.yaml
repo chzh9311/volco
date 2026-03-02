@@ -29,8 +29,9 @@ val:
 
 test:
   n_processes: 16
-  n_samples: 512
+  n_samples: 256
   batch_size: ${test.n_samples}
+  vis_every_n_batches: 1
 
 checkpoint:
   dirpath: logs/checkpoints/gridae/${ae.feat_dim}latent/
@@ -53,7 +54,8 @@ trainer: ## For instantiating pytorch-lightning Trainer
 run_phase: train
 # ckpt_path: logs/checkpoints/gridae/128latent/best-epoch=16-val/total_loss=0.0948.ckpt
 # ckpt_path: # logs/checkpoints/gridae/128latent-v2/best-20epoch.ckpt
-ckpt_path: # logs/checkpoints/gridae/mlpres_v2/256latent/best.ckpt
+ckpt_path: logs/checkpoints/gridae/mlpres_v2/128latent-contactonly/best.ckpt
+# ckpt_path: # logs/checkpoints/gridae/mlpres_v2/256latent/best.ckpt
 
 hydra:
   job:

@@ -18,6 +18,7 @@ from lightning import LightningDataModule
 from copy import copy
 import math
 import cv2
+from .hoi_dataset import BaseHOIDataset
 from mano.webuser.smpl_handpca_wrapper_HAND_only import load_model
 # from manopth.manolayer import ManoLayer
 
@@ -27,75 +28,80 @@ jointsMapManoToSimple = [0,
                          4, 5, 6, 18,
                          10, 11, 12, 19,
                          7, 8, 9, 20]
+obj_names = ['011_banana', '021_bleach_cleanser', '003_cracker_box', '035_power_drill', '025_mug',
+            '006_mustard_bottle', '019_pitcher_base', '010_potted_meat_can', '037_scissors', '004_sugar_box']
 
-class HO3DDatasetModule(LightningDataModule):
-    def __init__(self, cfg):
-        super().__init__()
-        self.data_cfg = cfg.data
-        self.data_dir = cfg.data.dataset_path
-        self.obj_dir = cfg.data.obj_model_path
-        self.train_batch_size = cfg.train.batch_size
-        self.val_batch_size = cfg.val.batch_size
-        self.test_batch_size = cfg.test.batch_size
-        self.randrot = True # not cfg.model.name == 'external'
-
-    def prepare_data(self):
-        """
-        Calculate and cache the MANO & Object models
-        """
-        pass
-
-    def setup(self, stage: str):
-        if stage == 'fit' or stage == 'validate':
-            ho3d_full = HO3DDataset(self.data_cfg, 'train')
-            self.train_set, self.val_set = random_split(ho3d_full, [0.8, 0.2], generator=torch.Generator().manual_seed(42))
-        else:
-            self.test_set = HO3DDataset(self.data_cfg, 'test')
-
-    def train_dataloader(self):
-        return DataLoader(self.train_set, batch_size=self.train_batch_size, shuffle=True, num_workers=8)
-
-    def val_dataloader(self):
-        return DataLoader(self.val_set, batch_size=self.val_batch_size, shuffle=False, num_workers=8)
-
-    def test_dataloader(self):
-        return DataLoader(self.test_set, batch_size=self.test_batch_size, shuffle=False, num_workers=8)
-
-
-class HO3DDataset(Dataset):
-    def __init__(self, cfg, split: str):
-        super().__init__()
+class HO3DDataset(BaseHOIDataset):
+    def __init__(self, cfg, split: str, load_msdf: bool = False, load_grid_contact: bool = False, object_only: bool = True):
         self.data_dir = cfg.dataset_path
         self.obj_dir = cfg.obj_model_path
         self.n_samples = cfg.object_sample
         self.split = split
         self.num_samples = cfg.test_samples
-        # self.randrotmats = np.load(osp.join('data', 'misc', 'rand_rots.npy'))
+        self.dataset_name = 'ho3d'
+        super().__init__(cfg, split, load_msdf=load_msdf, load_grid_contact=load_grid_contact, object_only=object_only)
 
-        if not split == 'test':
-            self.annots = self._load_annot(self.data_dir, self.obj_dir, split)
+    @staticmethod
+    def load_mesh_info(data_dir, n_samples=1024, msdf_path=None):
+        """
+        Load mesh information from the dataset.
+        
+        :param data_dir: the directory where the dataset is stored
+        :param split: train/val/test split
+        """
+        obj_info = {}
+        for k in obj_names:
+            mesh = trimesh.load(osp.join(data_dir, 'models', k, 'textured_simple.obj'), process=False)
+            obj_info[k] = {
+                'verts': np.copy(mesh.vertices),
+                'faces': np.copy(mesh.faces)
+            }
+            # mesh = trimesh.Trimesh(v['verts'], v['faces'], process=False)
+            sample_pts, fid = trimesh.sample.sample_surface(mesh, count=n_samples)
+            obj_info[k]['samples'] = sample_pts
+            obj_info[k]['sample_normals'] = mesh.face_normals[fid]
+            obj_info[k]['CoM'] = mesh.center_mass
 
-        self.obj_info = {}
-        # self.obj_names = sorted(os.listdir(osp.join(self.obj_dir, 'models')))
-        self.obj_names = ['011_banana', '021_bleach_cleanser', '003_cracker_box', '035_power_drill', '025_mug',
-                             '006_mustard_bottle', '019_pitcher_base', '010_potted_meat_can', '037_scissors',
-                             '004_sugar_box']
-        for obj_name in self.obj_names:
-            omodel = read_obj(osp.join(self.obj_dir, 'models', obj_name, 'textured_simple.obj'))
-            omesh = trimesh.Trimesh(np.copy(omodel.v), np.copy(omodel.f))
-            samples, fid = trimesh.sample.sample_surface(omesh, count=self.n_samples)
-            self.obj_info[obj_name] = {'samples': np.asarray(samples), 'sample_normals':np.asarray(omesh.face_normals[fid]),
-                                       'com': omesh.center_mass, 'verts': np.copy(omodel.v), 'faces': np.copy(omodel.f)}
+            ## Assume unit density 1kg/cm^3
+            obj_info[k]['mass'] = mesh.mass
+            obj_info[k]['inertia'] = mesh.moment_inertia
+
+        if msdf_path is not None:
+            adj_point_path = msdf_path.replace('msdf', 'msdf_adj_points')
+            for k, v in obj_info.items():
+                if os.path.exists(osp.join(msdf_path, f'{k}.npz')):
+                    msdf_data = np.load(osp.join(msdf_path, f'{k}.npz'))
+                    v['msdf'] = msdf_data['msdf']
+                    if 'msdf_grad' in msdf_data:
+                        v['msdf_grad'] = msdf_data['msdf_grad']
+                if os.path.exists(osp.join(adj_point_path, f'{k}.npz')):
+                    adj_data = np.load(osp.join(adj_point_path, f'{k}.npz'))
+                    v['adj_indices'] = adj_data['indices']
+                    v['adj_distances'] = adj_data['distances']
+                    v['n_adj_points'] = adj_data['n_adj_points']
+        return obj_info
+    
+
+    def _load_data(self):
+        if self.split != 'test':
+            self.annots = self._load_annot(self.data_dir, self.obj_dir, self.split)
+
+        self.obj_info = self.load_mesh_info(self.obj_dir, n_samples=self.n_samples, msdf_path=self.msdf_path)
+        self.simp_obj_mesh = self.obj_info
+        self.test_objects = obj_names
 
         self.obj_hulls = {}
-        # self.obj_mass = {}
-        for obj_name in self.obj_info.keys():
+        for obj_name in obj_names:
             hulls = []
             hull_path = osp.join(self.obj_dir, 'obj_hulls', obj_name)
             for i in range(len(os.listdir(hull_path))):
                 hulls.append(trimesh.load(osp.join(hull_path, f'hull_{i}.stl')))
-
             self.obj_hulls[obj_name] = hulls
+
+        self.rh_data = None
+        self.object_data = None
+        self.frame_names = None
+    
 
     def _load_annot(self, data_dir, obj_dir, split):
         annots = []
@@ -131,37 +137,6 @@ class HO3DDataset(Dataset):
 
         return annots
 
-    def __len__(self):
-        if self.split == 'test':
-            return len(self.obj_names) * self.num_samples
-        else:
-            return len(self.annots)
-
-    def __getitem__(self, idx):
-        sample = {}
-        if self.split in ['train', 'val']:
-            get_keys = ['handBeta', 'handPose', 'handTrans', 'objRot', 'objTrans', 'objCorners3DRest', 'camEx', 'objName']
-
-            for k in get_keys:
-                sample[k] = self.annots[idx][k]
-        else:
-            obj_name = self.obj_names[int(idx // self.num_samples)]
-            obj_sample_pts = self.obj_info[obj_name]['samples'] # n_sample x 3
-            obj_sample_normals = self.obj_info[obj_name]['sample_normals'] # n_sample x 3
-            ## For testing, return object with random rotations. The rng is set to make sure
-            ## each idx generates fixed rotation.
-            # obj_sample_pts = obj_sample_pts @ objR
-            # obj_sample_normals = obj_sample_normals @ objR
-            # obj_com = obj_com.reshape(1, 3) @ objR
-            sample = {
-                'objName': obj_name,
-                'objSamplePts': obj_sample_pts,
-                'objSampleNormals': obj_sample_normals,
-                # 'contact': torch.clip(self.object_data['contact'][idx], 0, 1),
-                # 'contactPart': regularize_part_id(self.object_data['contact'][idx], hand_side) # 0 - 15
-            }
-
-        return sample
 
 def showHandJoints(imgInOrg, gtIn, filename=None):
     '''

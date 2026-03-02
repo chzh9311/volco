@@ -19,7 +19,7 @@ unet:
   use_position_embedding: false # for input x
   obj_feat_dim: ${add:1024,${generator.unet.context_dim}}  # pointfeat(1024) + obj_feat(${ae.obj_feat_dim})
   obj_encoder:
-    in_dim: ${add:3,${ae.obj_feat_dim}}
+    in_dim: 515 #${add:3,${ae.obj_feat_dim}}
     hidden_dim: 256
     feat_dim: ${generator.unet.context_dim}
 

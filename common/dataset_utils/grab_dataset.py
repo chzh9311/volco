@@ -12,9 +12,7 @@ import os.path as osp
 import numpy as np
 
 import torch
-from torch.utils.data import DataLoader, Dataset
 import torch.nn.functional as F
-from lightning import LightningDataModule
 # from mesh_to_sdf import mesh_to_sdf
 import open3d as o3d
 from multiprocessing.pool import Pool

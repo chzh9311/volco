@@ -13,7 +13,7 @@ contact_unit: "grid"
 train:
   optimizer: "adamw"
   lr: 1e-4
-  batch_size: 32
+  batch_size: 48
   vis_every_n_batches: 1000
   augment: true
   loss_weights:
@@ -31,7 +31,7 @@ train:
 seed: 1987
 
 val:
-  batch_size: 32
+  batch_size: 48
   vis_every_n_batches: 50
 
 checkpoint:

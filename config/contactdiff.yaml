@@ -25,7 +25,7 @@ train:
     # consistency_contact_loss: 5.0
     # consistency_cse_loss: 1.0
   
-  resume_ckpt: # logs/checkpoints/mlcdiff/with_hand_guide/newae_v2/last.ckpt
+  resume_ckpt: logs/checkpoints/ablations/pointcontact/epoch1.ckpt # logs/checkpoints/mlcdiff/with_hand_guide/newae_v2/last.ckpt
 
 seed: 1987
 
@@ -61,8 +61,8 @@ trainer: ## For instantiating pytorch-lightning Trainer
   enable_model_summary: true
   # gradient_clip_val: 1.0
   # profiler: simple
-  # limit_train_batches: 10
-  # limit_val_batches: 10
+  # limit_train_batches: 50
+  # limit_val_batches: 50
 
 physics:
   k: 0.2

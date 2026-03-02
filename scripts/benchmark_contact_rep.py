@@ -62,6 +62,7 @@ def test_contact(cfg):
     pool = Pool(processes=8)
     eval_util = EvalUtil(num_kp=778)  # one "keypoint" per mesh vertex for AUC
     all_mpvpe, all_f5, all_f15 = [], [], []
+    saved_hand_verts, saved_hand_joints = [], []
     t_start = time.time()
     if cfg.correspondence_type == 'contactgen':
         config_file = "prev_sota/config.yaml"
@@ -77,6 +78,8 @@ def test_contact(cfg):
         hand_model.to(device)
 
     for idx, batch in enumerate(train_loader):
+        if idx > 10:
+            break
         elapsed = time.time() - t_start
         avg_batch_time = elapsed / (idx + 1) if idx > 0 else 0.0
         remaining = avg_batch_time * (len(train_loader) - idx - 1)
@@ -174,7 +177,7 @@ def test_contact(cfg):
                 thin_objects = ['wineglass', 'mug', 'fryingpan']
                 global_pose, mano_pose, mano_shape, mano_trans, init_pose = optimize_pose_contactopt(
                                     mano_layer, ho_gt.obj_verts, ho_gt.obj_normals,
-                                    ho_gt.contact_map, pmap, n_iter=1000, save_history=False,
+                                    ho_gt.contact_map.squeeze(-1), pmap, n_iter=1000, save_history=False,
                                     partition_type=cfg.correspondence_type, w_pen_cost=40, 
                                     hand_cse=hand_cse if cfg.correspondence_type=='cse' else None,
                                     is_thin=torch.LongTensor([obj_name in thin_objects for obj_name in obj_names]).to(device))
@@ -203,6 +206,9 @@ def test_contact(cfg):
             vis = np.ones(778, dtype=bool)
             eval_util.feed(gt_handV[b], vis, all_handV[b], skip_check=False)
 
+        saved_hand_verts.append(all_handV)
+        saved_hand_joints.append(all_handJ)
+
         avg_mpvpe = float(np.mean(mpvpe))
         avg_f5 = float(np.mean(all_f5[-cur_batch_size:]))
         avg_f15 = float(np.mean(all_f15[-cur_batch_size:]))
@@ -222,10 +228,19 @@ def test_contact(cfg):
     for k, v in overall.items():
         print(f"  {k}: {v:.4f}")
 
-    df = pd.DataFrame([overall], index=['mean'])
-    csv_path = f'tmp/benchmark_contact_rep_results_{cfg.contact_unit}_{cfg.correspondence_type}.csv'
-    df.to_csv(csv_path)
-    print(f"\nResults saved to {csv_path}")
+    # df = pd.DataFrame([overall], index=['mean'])
+    # csv_path = f'tmp/benchmark_contact_rep_results_{cfg.contact_unit}_{cfg.correspondence_type}.csv'
+    # df.to_csv(csv_path)
+    # print(f"\nResults saved to {csv_path}")
+
+    npz_path = f'tmp/benchmark_contact_rep_hands_{cfg.contact_unit}_{cfg.correspondence_type}.npz'
+    np.savez_compressed(
+        npz_path,
+        hand_verts=np.concatenate(saved_hand_verts, axis=0),   # (N_total, 778, 3)
+        hand_joints=np.concatenate(saved_hand_joints, axis=0), # (N_total, 21, 3)
+        mpvpe=np.array(all_mpvpe),                             # (N_total,) in mm
+    )
+    print(f"Hand verts/joints saved to {npz_path}")
 
     pool.close()
     pool.join()

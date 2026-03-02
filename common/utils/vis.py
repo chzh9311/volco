@@ -14,6 +14,82 @@ def parse_hex_color(hex_color: str):
     color = [int(hex_color[i:i+2], 16) / 255.0 for i in (1, 3, 5)]
     return color
 
+def clip_mesh_to_aabb(mesh, min_bound, max_bound, color=None):
+    """
+    Clip an Open3D TriangleMesh to an axis-aligned bounding box using
+    Sutherland-Hodgman clipping. Triangles straddling a face of the box are
+    split at the boundary, producing new vertices and triangles.
+
+    Args:
+        mesh: o3d.geometry.TriangleMesh
+        min_bound: array-like (3,), lower corner of the box
+        max_bound: array-like (3,), upper corner of the box
+        color: optional RGB list/array to paint the result
+
+    Returns:
+        o3d.geometry.TriangleMesh with clipped geometry
+    """
+    min_b = np.asarray(min_bound, dtype=np.float64)
+    max_b = np.asarray(max_bound, dtype=np.float64)
+    verts = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.triangles)
+
+    # Each clipping plane: (axis, sign, limit)
+    # sign=+1 → keep where v[axis] >= limit  (min plane)
+    # sign=-1 → keep where v[axis] <= limit  (max plane)
+    planes = [(ax, +1, min_b[ax]) for ax in range(3)] + \
+             [(ax, -1, max_b[ax]) for ax in range(3)]
+
+    def _intersect(p, q, ax, limit):
+        """Linearly interpolate the crossing point of edge p→q at v[ax]=limit."""
+        t = (limit - p[ax]) / (q[ax] - p[ax])
+        return p + t * (q - p)
+
+    def _clip_polygon(poly, ax, sign, limit):
+        """Clip a convex polygon (list of 3-vectors) against one half-space."""
+        if len(poly) == 0:
+            return []
+        out = []
+        for i in range(len(poly)):
+            cur, nxt = poly[i], poly[(i + 1) % len(poly)]
+            cur_in = sign * (cur[ax] - limit) >= 0
+            nxt_in = sign * (nxt[ax] - limit) >= 0
+            if cur_in:
+                out.append(cur)
+            if cur_in != nxt_in:
+                out.append(_intersect(cur, nxt, ax, limit))
+        return out
+
+    out_verts = []
+    out_faces = []
+
+    for tri in faces:
+        polygon = [verts[tri[0]], verts[tri[1]], verts[tri[2]]]
+        for (ax, sign, limit) in planes:
+            polygon = _clip_polygon(polygon, ax, sign, limit)
+            if not polygon:
+                break
+        if len(polygon) < 3:
+            continue
+        # Fan-triangulate the (possibly split) polygon
+        base_idx = len(out_verts)
+        out_verts.extend(polygon)
+        for k in range(1, len(polygon) - 1):
+            out_faces.append([base_idx, base_idx + k, base_idx + k + 1])
+
+    if not out_verts:
+        return o3d.geometry.TriangleMesh()
+
+    result = o3d.geometry.TriangleMesh()
+    result.vertices = o3d.utility.Vector3dVector(np.array(out_verts))
+    result.triangles = o3d.utility.Vector3iVector(np.array(out_faces))
+    result.merge_close_vertices(1e-9)
+    result.compute_vertex_normals()
+    if color is not None:
+        result.paint_uniform_color(color)
+    return result
+
+
 def o3dmesh(vert, face, color=None):
     """
     Input: vert_list, face_list: list of numpy arrays of shape [N, 3]
@@ -125,7 +201,7 @@ def o3d_point(pos, radius, color=None):
 
 
 def extract_masked_mesh_components(hand_verts, hand_faces, vertex_mask, part_ids,
-                                   create_geometries=True):
+                                   create_geometries=True, uniform_color=None):
     """
     Extract masked faces and isolated vertices from a hand mesh based on a vertex mask.
     Optionally create Open3D geometries for visualization, colored by part_ids.
@@ -136,6 +212,8 @@ def extract_masked_mesh_components(hand_verts, hand_faces, vertex_mask, part_ids
         vertex_mask: numpy array of shape (N,), boolean mask indicating which vertices are active
         part_ids: numpy array of shape (N,), part IDs for each vertex (used for coloring with hsv colormap)
         create_geometries: bool, if True, create Open3D geometries for the mesh and isolated points
+        uniform_color: optional RGB tuple/array of shape (3,) in [0, 1]. If set, all vertices are
+            painted this color instead of the part-conditioned HSV colormap.
 
     Returns:
         If create_geometries is False:
@@ -163,9 +241,12 @@ def extract_masked_mesh_components(hand_verts, hand_faces, vertex_mask, part_ids
     # Create Open3D geometries
     geometries = []
 
-    # Color vertices by part_ids using hsv colormap (same as handobject.py)
-    part_cmap = plt.colormaps['hsv']
-    vertex_colors = part_cmap(part_ids / 16)[:, :3]
+    # Color vertices: uniform color if specified, otherwise part-conditioned HSV
+    if uniform_color is not None:
+        vertex_colors = np.tile(np.array(uniform_color, dtype=np.float64), (len(hand_verts), 1))
+    else:
+        part_cmap = plt.colormaps['hsv']
+        vertex_colors = part_cmap(part_ids / 16)[:, :3]
 
     # Create mesh with only masked faces
     if len(masked_faces) > 0:
@@ -186,7 +267,7 @@ def extract_masked_mesh_components(hand_verts, hand_faces, vertex_mask, part_ids
     return geometries
 
 
-def geom_to_img(vis_geoms, w, h, scale=0.07, half_range=None):
+def geom_to_img(vis_geoms, w, h, scale=0.07, half_range=None, point_size=20):
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
     import matplotlib
     matplotlib.use('Agg')  # Use non-interactive backend
@@ -232,8 +313,18 @@ def geom_to_img(vis_geoms, w, h, scale=0.07, half_range=None):
             else:
                 colors = np.ones((len(points), 3)) * 0.5  # Default gray
 
+            per_point_sizes = geom.get('point_sizes') if type(geom) is dict else None
             all_vertices.append(points)
-            pointcloud_data.append({'points': points, 'colors': colors})
+            pointcloud_data.append({'points': points, 'colors': colors, 'point_sizes': per_point_sizes})
+
+        elif isinstance(o3d_geom, o3d.geometry.LineSet):
+            pts = np.asarray(o3d_geom.points)
+            lines = np.asarray(o3d_geom.lines)
+            if len(pts) == 0 or len(lines) == 0:
+                continue
+            line_colors = np.asarray(o3d_geom.colors) if o3d_geom.has_colors() else np.zeros((len(lines), 3))
+            all_vertices.append(pts)
+            pointcloud_data.append({'_lineset': True, 'points': pts, 'lines': lines, 'colors': line_colors})
 
     if len(all_vertices) == 0:
         print("Warning: No valid geometries to render")
@@ -296,12 +387,20 @@ def geom_to_img(vis_geoms, w, h, scale=0.07, half_range=None):
                                              zsort='average')  # Enable depth sorting
                 ax.add_collection3d(collection)
 
-        # Render all point clouds
+        # Render all point clouds and linesets
         for pc in pointcloud_data:
             points = pc['points']
             colors = pc['colors']
-            ax.scatter(points[:, 0], points[:, 1], points[:, 2],
-                      c=colors, s=5, alpha=0.8, depthshade=True)
+            if pc.get('_lineset'):
+                lines = pc['lines']
+                for li, (i, j) in enumerate(lines):
+                    seg = np.array([points[i], points[j]])
+                    c = colors[li] if li < len(colors) else [0, 1, 0]
+                    ax.plot(seg[:, 0], seg[:, 1], seg[:, 2], color=c, linewidth=1.0)
+            else:
+                s = pc['point_sizes'] if pc['point_sizes'] is not None else point_size
+                ax.scatter(points[:, 0], points[:, 1], points[:, 2],
+                          c=colors, s=s, alpha=0.8, depthshade=True)
 
         # Set tight limits around the object
         ax.set_xlim(center[0] - half_range, center[0] + half_range)

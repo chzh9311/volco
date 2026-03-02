@@ -151,9 +151,9 @@ class PointContactDiffTrainer(L.LightningModule):
         cse_loss = F.mse_loss(gt_contact[:, :, :1] * (pred_cse - gt_contact[:, :, 1:]),
                               torch.zeros_like(pred_cse).to(self.device).float(), reduction='sum') / (torch.sum(gt_contact[:, :, :1]) + 1e-8)
         losses = {}
-        losses[f'{stage}/contact_loss'] = contact_loss
-        losses[f'{stage}/cse_loss'] = cse_loss
-        losses[f'{stage}/total_loss'] = contact_loss + cse_loss * 0.05
+        losses['contact_loss'] = contact_loss
+        losses['cse_loss'] = cse_loss
+        losses['total_loss'] = contact_loss + cse_loss * 0.05
 
         loss_dict = {f'{stage}/{k}': v for k, v in losses.items()}
         if stage == 'val':
@@ -161,7 +161,8 @@ class PointContactDiffTrainer(L.LightningModule):
         else:
             self.log_dict(loss_dict, prog_bar=True, sync_dist=True)
 
-        if batch_idx % self.cfg[stage].vis_every_n_batches == 0 and batch_idx > 0:
+        if False:
+        # if batch_idx % self.cfg[stage].vis_every_n_batches == 0:
             vis_idx = 0
             vis_data = {k: v[vis_idx:vis_idx+1] for k, v in input_data.items()}
             condition = self.model.condition(vis_data)
@@ -208,7 +209,7 @@ class PointContactDiffTrainer(L.LightningModule):
                     import wandb
                     self.logger.experiment.log({f'{stage}/GT_vs_sampled_contact': wandb.Image(pred_cmap_img)}, step=self.global_step)
                     self.logger.experiment.log({f'{stage}/GT_vs_sampled_part': wandb.Image(pred_pmap_img)}, step=self.global_step)
-        return losses[f'{stage}/total_loss']
+        return losses['total_loss']
     
     def visualize_full_hand_comparison(self, pred_handV, gt_handV, obj_template):
         hand_faces = self.mano_layer.th_faces.detach().cpu().numpy()

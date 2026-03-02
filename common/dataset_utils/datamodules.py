@@ -297,7 +297,10 @@ class HOIDatasetModule(LightningDataModule):
         """
         Dump precalculated variables, mainly M-SDF
         """
-        obj_info = self.dataset_class.load_mesh_info(self.data_dir)
+        if self.cfg.dataset_name == 'ho3d':
+            obj_info = self.dataset_class.load_mesh_info(self.cfg.obj_model_path, n_samples=self.cfg.object_sample)
+        else:
+            obj_info = self.dataset_class.load_mesh_info(self.data_dir)
         for k, v in obj_info.items():
             mesh = trimesh.Trimesh(v['verts'], v['faces'], process=False)
             if 'msdf' in self.cfg and self.load_msdf:

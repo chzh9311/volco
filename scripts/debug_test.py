@@ -552,8 +552,68 @@ def vis_part_contact():
                                       window_name="Fingertip Part Contact Visualization")
 
 
+@hydra.main(config_path="../config", config_name="mlcdiff", version_base=None)
+def test_ho3d_dataloader(cfg):
+    """
+    Test HO3DDataset loading via HOIDatasetModule on the test split.
+    Runs prepare_data and setup('test'), then visualizes each loaded object mesh in 3D.
+    """
+    from common.dataset_utils.datamodules import HOIDatasetModule
+
+    dm = HOIDatasetModule(cfg)
+
+    print("Running prepare_data (precomputes MSDF if not cached)...")
+    dm.prepare_data()
+
+    print("Setting up test dataset...")
+    dm.setup('test')
+
+    test_set = dm.test_set
+    print(f"Test dataset size: {len(test_set)} objects")
+    print(f"Test objects: {test_set.test_objects}")
+
+    loader = dm.test_dataloader()
+
+    for batch_idx, batch in enumerate(loader):
+        obj_name = batch['objName'][0]
+        obj_com = batch['objCoM'][0].numpy()
+        obj_mass = batch['objMass'][0].item()
+
+        print(f"\n--- Object {batch_idx}: {obj_name} ---")
+        print(f"  CoM: {obj_com}")
+        print(f"  Mass: {obj_mass:.4f}")
+        if 'objMsdf' in batch:
+            msdf = batch['objMsdf'][0]
+            print(f"  MSDF shape: {tuple(msdf.shape)}")
+            print(f"  MSDF value range: [{msdf[:, :-3].min():.4f}, {msdf[:, :-3].max():.4f}]")
+
+        # Build Open3D mesh from obj_info
+        verts = test_set.obj_info[obj_name]['verts']
+        faces = test_set.obj_info[obj_name]['faces']
+
+        mesh = o3d.geometry.TriangleMesh()
+        mesh.vertices = o3d.utility.Vector3dVector(verts)
+        mesh.triangles = o3d.utility.Vector3iVector(faces)
+        mesh.compute_vertex_normals()
+        mesh.paint_uniform_color([0.6, 0.8, 1.0])
+
+        # Mark CoM as a small sphere
+        com_sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.005)
+        com_sphere.translate(obj_com)
+        com_sphere.paint_uniform_color([1.0, 0.3, 0.3])
+        com_sphere.compute_vertex_normals()
+
+        coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.05)
+
+        o3d.visualization.draw_geometries(
+            [mesh, com_sphere, coord_frame],
+            window_name=f"{obj_name}  (mass={obj_mass:.3f})"
+        )
+
+
 if __name__ == "__main__":
-    vis_msdf_data_sample()
+    test_ho3d_dataloader()
+    # vis_msdf_data_sample()
     # test_obj()
     # vis_local_grid_interact()
     # test_pointvae()
