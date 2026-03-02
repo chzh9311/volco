@@ -3,6 +3,7 @@
 .vscode/**
 checkpoints/**
 data/grab
+data/ycb_objects
 data/YCB_Video
 data/misc/mano_v1_2
 data/preprocessed/**
