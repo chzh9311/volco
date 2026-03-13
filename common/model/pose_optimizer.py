@@ -101,18 +101,11 @@ def optimize_pose_contactopt(mano_layer, obj_verts, obj_normals, obj_contact_tar
                 contact_obj[obj_mask] = c_full.squeeze(-1)[obj_mask]
         
         elif partition_type == 'cse':
-            target_hand_pts = Wverts @ hand_verts # (B, N, 3)
-            capsule_tops = obj_verts + obj_normals * caps_top  # Coordinates of the top focii of the capsules (batch, V, 3)
-            capsule_bots = obj_verts + obj_normals * caps_bot
-            delta_top = target_hand_pts - capsule_tops
-
-            bot_to_top = capsule_bots - capsule_tops  # Vector from capsule bottom to top
-            along_axis = torch.sum(delta_top * bot_to_top, dim=2)   # Dot product
-            top_to_bot_square = torch.sum(bot_to_top * bot_to_top, dim=2)
-            h = torch.clamp(along_axis / top_to_bot_square, 0, 1)   # Could avoid NaNs with offset in division here
-            dist_to_axis = torch.norm(delta_top - bot_to_top * h.unsqueeze(2), dim=2)   # Distance to capsule centerline
-            dist = dist_to_axis / caps_rad
-            contact_obj = sdf_to_contact(dist, None, method=contact_norm_method)# * (dot_obj/2+0.5) # TODO dotting contact normal
+            # CSE correspondence: each obj point maps to a weighted combination of hand vertices.
+            # Distance is point-to-point between obj vertex and its CSE-corresponding hand point.
+            target_hand_pts = Wverts @ hand_verts  # (B, N, 3)
+            dist = torch.norm(obj_verts - target_hand_pts, dim=-1) / caps_rad  # (B, N)
+            contact_obj = sdf_to_contact(dist, None, method=contact_norm_method)
         else:
             c_full, _, _ = calculate_contact_capsule(
                 hand_verts,

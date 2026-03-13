@@ -463,7 +463,7 @@ class LGCDiffTrainer(L.LightningModule):
             #     wandb.define_metric(metric, summary='mean')
             # Initialize W&B table for test images
             self.test_images_table = wandb.Table(columns=[
-                "batch_idx", "obj_name", "surrounding_hands", "sampled_grasp", "contact_mask",
+                "batch_idx", "obj_name", "surrounding_hands", "sampled_grasp",
                 "sim_displacement", "penetration_depth", "intersection_volume"
             ])
 
@@ -550,7 +550,8 @@ class LGCDiffTrainer(L.LightningModule):
             # sample_latent = samples ## B x latent
             latent = samples.reshape(n_samples*n_grids, -1)
             ## repeat the multi-scale obj cond here
-            multi_scale_obj_cond = [cond.repeat(n_samples, 1, 1, 1, 1) for cond in multi_scale_obj_cond]
+            multi_scale_obj_cond = [cond.repeat(n_samples, *([1] * (cond.ndim - 1))) for cond in multi_scale_obj_cond]
+            multi_scale_obj_cond.append(obj_feat.repeat(n_samples, 1))
             recon_lg_contact = self.grid_ae.decode(latent, multi_scale_obj_cond)
             # recon_lg_contact, mu, logvar = self.model(
             #     lg_contact.permute(0, 1, 5, 2, 3, 4), obj_msdf=obj_msdf, msdf_center=obj_msdf_center)
@@ -587,11 +588,21 @@ class LGCDiffTrainer(L.LightningModule):
             handV, handJ, _ = self.mano_layer(recon_pose, th_betas=recon_betas, th_trans=recon_trans)
         else:
             with torch.enable_grad():
-                mano_trans, global_pose, mano_pose, mano_shape = optimize_pose_wrt_local_grids(
+                recon_hand_verts, recon_verts_mask = recover_hand_verts_from_contact(
+                    self.hand_cse, None,
+                    pred_grid_contact.reshape(n_samples, -1), pred_grid_cse.reshape(n_samples, -1, self.cse_dim),
+                    grid_coords=grid_coords.reshape(n_samples, -1, 3),
+                    chunk_size=10
+                )
+                obj_msdf_grid = handobject.obj_msdf[:, :, :self.msdf_k**3].view(-1, 1, self.msdf_k, self.msdf_k, self.msdf_k) # (B*N) x 1 x k x k x k
+                params, contact_mask = optimize_pose_wrt_local_grids(
                             self.mano_layer, grid_centers=obj_msdf_center, target_pts=grid_coords.view(n_samples, -1, 3),
-                            target_W_verts=pred_targetWverts, weights=pred_grid_contact,
+                            dist2contact_fn=self.grid_dist_to_contact,
+                            target_W_verts=pred_targetWverts, weights=pred_grid_contact, grid_sdfs=obj_msdf_grid.squeeze(1),
                             n_iter=self.cfg.pose_optimizer.n_opt_iter, lr=self.cfg.pose_optimizer.opt_lr,
+                            recon_hand_verts=recon_hand_verts, recon_verts_mask=recon_verts_mask,
                             grid_scale=self.cfg.msdf.scale, w_repulsive=self.cfg.pose_optimizer.w_repulsive)
+                mano_trans, global_pose, mano_pose, mano_shape = params
 
                 # mano_trans, global_pose, mano_pose, mano_shape = optimize_pose_by_contact(
                 #             self.mano_layer, grid_centers=obj_msdf_center, target_pts=grid_coords.view(n_samples, -1, 3),
@@ -608,11 +619,6 @@ class LGCDiffTrainer(L.LightningModule):
                        'idx': i} for i in range(handV.shape[0])]
             
         result = calculate_metrics(param_list, metrics=self.cfg.test.criteria, pool=self.pool, reduction='none')
-        ## MPJPE:
-        if self.cfg.test_gt:
-            mpjpe = np.linalg.norm(handobject.hand_joints.cpu().numpy() - handJ, axis=-1).mean(axis=1) * 1000  # B,
-            mpvpe = np.linalg.norm(handobject.hand_verts.cpu().numpy() - handV, axis=-1).mean(axis=1) * 1000  # B,
-            result.update({'MPJPE': mpjpe, 'MPVPE': mpvpe})
 
         self.all_results.append(result)
         self.sample_joints.append(handJ)

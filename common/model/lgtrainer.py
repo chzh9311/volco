@@ -176,6 +176,47 @@ class LGTrainer(L.LightningModule):
         #     gt_mask=batch['handVertMask'],
         #     batch_idx=0
         # )
+        loss_dict = {}
+        sigmas = np.linspace(0, 1, 11)
+        # sigma loop: accumulate (batch_size, n_sigmas) per batch
+        batch_rec_errors = []   # list of (batch_size,) tensors, one per sigma
+        batch_penes = []        # list of (batch_size,) tensors, one per sigma
+        for sigma in sigmas:
+            z_sample = posterior.mode() + sigma * torch.randn_like(posterior.mode())
+            sample_cgrid = self.model.decode(z_sample, obj_cond=obj_cond)
+            sample_cgrid = sample_cgrid.permute(0, 2, 3, 4, 1)
+            sample_handV, sample_hand_mask = recover_hand_verts_from_contact(
+                self.handcse, batch['face_idx'],
+                sample_cgrid[..., 0].view(batch_size, -1), sample_cgrid[..., 1:].view(batch_size, -1, sample_cgrid.shape[-1]-1),
+                grid_coords=self.grid_coords.view(1, -1, 3).repeat(batch_size, 1, 1),
+            )
+            pred_rec_error = masked_rec_loss(sample_handV, batch['nHandVerts'], gt_rec_verts_mask, reduction='none') * 1000
+            valid_mask = sample_cgrid[..., 0].view(batch_size, -1) > 0.9
+            sdf = grid_sdf.view(batch_size, -1)
+            pene = -torch.min(sdf * valid_mask, dim=1).values * 0.01 * np.sqrt(3) # denormalize
+            pene = pene.clamp(min=0)
+            batch_rec_errors.append(pred_rec_error.detach().cpu().numpy())   # (batch_size,)
+            batch_penes.append(pene.detach().cpu().numpy())                   # (batch_size,)
+
+        # Accumulate (batch_size, n_sigmas) per batch step
+        if not hasattr(self, '_test_rec_errors'):
+            self._test_rec_errors = []
+            self._test_penes = []
+            self._test_gt_rec_errors = []
+            self._test_gt_penes = []
+        sigma_rec = np.stack(batch_rec_errors, axis=1)   # (batch_size, n_sigmas)
+        sigma_pene = np.stack(batch_penes, axis=1)        # (batch_size, n_sigmas)
+        self._test_rec_errors.append(sigma_rec)
+        self._test_penes.append(sigma_pene)
+
+        # GT reconstruction error and penetration, per sample
+        gt_rec_error_per = masked_rec_loss(gt_rec_hand_verts, batch['nHandVerts'], gt_rec_verts_mask, reduction='none') * 1000
+        gt_valid_mask = gt_grid_contact[..., 0].view(batch_size, -1) > 0.9
+        gt_sdf = grid_sdf.view(batch_size, -1)
+        gt_pene = -torch.min(gt_sdf * gt_valid_mask, dim=1).values * 0.01 * np.sqrt(3)
+        gt_pene = gt_pene.clamp(min=0)
+        self._test_gt_rec_errors.append(gt_rec_error_per.detach().cpu().numpy())   # (batch_size,)
+        self._test_gt_penes.append(gt_pene.detach().cpu().numpy())                 # (batch_size,)
 
         gt_rec_error = masked_rec_loss(gt_rec_hand_verts, batch['nHandVerts'], gt_rec_verts_mask) * 1000
         pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
@@ -199,10 +240,10 @@ class LGTrainer(L.LightningModule):
         # o3d.visualization.draw_geometries(all_geoms, window_name='GT and Pred Local Grid Visualization')
 
         pred_rec_error = masked_rec_loss(pred_hand_verts, batch['nHandVerts'], gt_rec_verts_mask) * 1000
-        loss_dict = {'test/gt_rec_error': gt_rec_error.item(),
-                     'test/pred_rec_error': pred_rec_error.item()}
+        loss_dict.update({'test/gt_rec_error': gt_rec_error.item(),
+                           'test/pred_rec_error': pred_rec_error.item()})
 
-        if batch_idx % self.cfg.test.vis_every_n_batches == 0:
+        if False: # batch_idx % self.cfg.test.vis_every_n_batches == 0:
             # Build local_grid (K,K,K,C) for sample 0 to extract the bbox lineset
             # vis_idx = 0
             for vis_idx in tqdm(range(batch_size)):
@@ -381,6 +422,28 @@ class LGTrainer(L.LightningModule):
         # o3d.visualization.draw_geometries(gt_geoms, window_name='GT Local Grid Visualization')
 
     
+    def on_test_epoch_end(self):
+        if not hasattr(self, '_test_rec_errors') or not self._test_rec_errors:
+            return
+        os.makedirs('tmp', exist_ok=True)
+        rec_arr  = np.concatenate(self._test_rec_errors, axis=0)    # (N_samples, n_sigmas)
+        pene_arr = np.concatenate(self._test_penes, axis=0)          # (N_samples, n_sigmas)
+        gt_rec_arr  = np.concatenate(self._test_gt_rec_errors, axis=0)  # (N_samples,)
+        gt_pene_arr = np.concatenate(self._test_gt_penes, axis=0)        # (N_samples,)
+        np.savez_compressed(
+            'tmp/sigma_test_results.npz',
+            rec_errors=rec_arr,        # (N_samples, 11)
+            pene=pene_arr,             # (N_samples, 11)
+            gt_rec_errors=gt_rec_arr,  # (N_samples,)
+            gt_pene=gt_pene_arr,       # (N_samples,)
+            sigmas=np.linspace(0, 1, 11),
+        )
+        print(f"Saved sigma test results to tmp/sigma_test_results.npz  shape={rec_arr.shape}")
+        self._test_rec_errors = []
+        self._test_penes = []
+        self._test_gt_rec_errors = []
+        self._test_gt_penes = []
+
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr)
         return optimizer

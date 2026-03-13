@@ -275,7 +275,6 @@ def geom_to_img_o3d(vis_geoms, w, h, scale=1, concat_axis=1):
     vis_geoms: list of o3d geometry objects or dicts with key 'geometry'
     Returns: float32 numpy array in [0, 1], shape (H, W*4, 3) or (H*4, W, 3)
     """
-    # Unwrap dicts the same way geom_to_img does
     raw_geoms = []
     for g in vis_geoms:
         raw_geoms.append(g['geometry'] if isinstance(g, dict) else g)
@@ -304,13 +303,13 @@ def geom_to_img_o3d(vis_geoms, w, h, scale=1, concat_axis=1):
         azim_rad = np.radians(azim)
         front = np.array([
             np.cos(elev_rad) * np.cos(azim_rad),
-            np.sin(elev_rad),
             np.cos(elev_rad) * np.sin(azim_rad),
+            np.sin(elev_rad),
         ])
 
         ctr = vis.get_view_control()
         ctr.set_front(front.tolist())
-        ctr.set_up([0.0, 1.0, 0.0])
+        ctr.set_up([0.0, 0.0, 1.0])
         ctr.set_lookat([0.0, 0.0, 0.0])
         ctr.set_zoom(scale)
 

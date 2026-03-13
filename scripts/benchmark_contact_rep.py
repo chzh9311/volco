@@ -394,5 +394,5 @@ def visualize_comparison(cfg):
 
 
 if __name__ == "__main__":
-    # test_contact()
-    visualize_comparison()
+    test_contact()
+    # visualize_comparison()

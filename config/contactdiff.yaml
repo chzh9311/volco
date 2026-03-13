@@ -2,7 +2,7 @@ defaults:
   - msdf: sparse
   - data: grab_multi_contact
   - generator: contact_ldm
-  - pose_optimizer: hybrid
+  - pose_optimizer: base
   - _self_
 
 training_stage: "generator"

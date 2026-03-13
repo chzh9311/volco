@@ -1,4 +1,6 @@
 import os
+import random
+from einops.array_api import rearrange
 import torch
 from torch.utils.data import DataLoader
 import trimesh
@@ -8,12 +10,13 @@ from matplotlib import pyplot as plt
 from common.manopth.manopth.manolayer import ManoLayer
 from common.dataset_utils.grab_dataset import GRABDataset
 from common.dataset_utils.datamodules import HOIDatasetModule, LocalGridDataModule
-from common.utils.vis import visualize_local_grid, visualize_local_grid_with_hand, o3dmesh, parse_hex_color
+from common.utils.vis import visualize_local_grid, visualize_local_grid_with_hand, o3dmesh, parse_hex_color, visualize_recon_hand_w_object
 from common.msdf.utils.msdf import get_grid
 from common.dataset_utils.hoi4d_dataset import HOI4DHandDataModule
 from common.utils.geometry import GridDistanceToContact
 from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
-from common.model.handobject import HandObject
+from common.model.handobject import HandObject, recover_hand_verts_from_contact
+from common.model.hand_cse.hand_cse import HandCSE
 # from common.model.vae.grid_vae import MLCVAE
 from tqdm import tqdm
 import numpy as np
@@ -120,13 +123,14 @@ def vis_msdf_data_sample(cfg):
     print("Setting up train dataset...")
     dm.setup('fit')
 
-    train_loader = DataLoader(dm.train_set, batch_size=1, shuffle=False,
+    train_loader = DataLoader(dm.val_set, batch_size=1, shuffle=False,
                               num_workers=4, collate_fn=dm.collate_fn)
     print(f"Train dataset size: {len(dm.train_set)}")
     print(f"Number of batches: {len(train_loader)}")
     print(f"Batch size: {dm.train_batch_size}")
 
     obj_info = dm.train_set.obj_info
+    return 
 
     print("\nVisualizing contact grids with hand...")
     for batch_idx, batch in enumerate(tqdm(train_loader, desc="Processing batches")):
@@ -134,7 +138,8 @@ def vis_msdf_data_sample(cfg):
         #     continue  # Only visualize cube samples for now
         if batch_idx % 100 != 0:
             continue  # Only visualize every 20th batch to reduce load
-        handobject = HandObject(cfg.data, device='cpu', mano_layer=mano_layer)
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        handobject = HandObject(cfg.data, device=device, mano_layer=mano_layer)
         obj_templates = [trimesh.Trimesh(obj_info[name]['verts'], obj_info[name]['faces'], process=False)
                          for name in batch['objName']]
         handobject.load_from_batch(batch, obj_templates=obj_templates, vis_obj_template=obj_templates)
@@ -143,23 +148,73 @@ def vis_msdf_data_sample(cfg):
         grid_dist = torch.norm(handobject.obj_msdf[:, :, -3:] - index_centre[:, None, :], dim=-1)  # (B, N) distance from each grid center to index fingertip center
         grid_indices = torch.argmin(grid_dist, dim=-1)  # (B,) indices of closest grid to index fingertip
 
-        batch_size = handobject.batch_size
-        n_grids = handobject.obj_msdf.shape[1]
-        for b in range(batch_size):
+        # cse_ckpt = torch.load(cfg.data.hand_cse_path, weights_only=False)
+        # hand_cse = HandCSE(n_verts=778, emb_dim=4, cano_faces=mano_layer.th_faces.cpu().numpy()).to(device)
+        # hand_cse.load_state_dict(cse_ckpt['state_dict'])
+        # hand_cse.eval().requires_grad_(False)
+
+        # batch_size = handobject.batch_size
+        # n_grids = handobject.obj_msdf.shape[1]
+
+        # lg_contact = handobject.ml_contact
+        # batch_size, n_grids = lg_contact.shape[:2]
+        # msdf_k = cfg.msdf.kernel_size
+        # # n_ho_dist = handobject.n_ho_dist
+
+        # obj_msdf_center = handobject.obj_msdf[:, :, msdf_k**3:] # B x 3
+
+        # normalized_grid_coords = get_grid(cfg.msdf.kernel_size).to(device)
+        # grid_coords = normalized_grid_coords * cfg.msdf.scale  # (K^3, 3)
+        # grid_coords = obj_msdf_center[:, :, None, :] + grid_coords.view(-1, 3)[None, None, :, :]  # B x N x K^3 x 3
+        # pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
+        #     hand_cse, None,
+        #     lg_contact[..., 0].reshape(batch_size, -1),
+        #     lg_contact[..., 1:].reshape(batch_size, -1, 4),
+        #     grid_coords=grid_coords.reshape(batch_size, -1, 3),
+        #     chunk_size=10  # Process in chunks of 10 to reduce memory peak
+        # )
+        # img_side = 400
+
+        for b in range(handobject.hand_verts.shape[0]):
             obj_name = batch['objName'][b]
-            print(f"  Batch {batch_idx}, sample {b} ({obj_name}), {n_grids} grids")
             grid_idx = grid_indices[b].item()
+            # recon_img, pred_geoms = visualize_recon_hand_w_object(
+            #     hand_verts=pred_hand_verts[b].detach().cpu().numpy(),
+            #     hand_verts_mask=pred_verts_mask[b].detach().cpu().numpy(),
+            #     hand_faces=mano_layer.th_faces.detach().cpu().numpy(),
+            #     obj_mesh=handobject.vis_obj_models[b],
+            #     part_ids=handobject.hand_part_ids,
+            #     msdf_center=obj_msdf_center[b].detach().cpu().numpy(),
+            #     grid_scale=cfg.msdf.scale,
+            #     h=img_side, w=img_side)
 
+            # hand_geom = o3dmesh(handobject.hand_verts[b].cpu().numpy(), mano_layer.th_faces.detach().cpu().numpy(), color="#F2A98D") # pink hand
+            # obj_geom = o3dmesh(obj_templates[b].vertices, obj_templates[b].faces, color="#6293A8") # blue object
             geoms = handobject.vis_all_grids_with_hand(obj_templates=obj_templates, idx=0, grid_idx=grid_idx)
-            o3d.visualization.draw_geometries(geoms)
+            # bbox_geoms = [g for g in geoms if isinstance(g, o3d.geometry.LineSet)]
+            # bbox_geoms = random.sample(bbox_geoms, len(bbox_geoms) // 2)
+            # o3d.visualization.draw_geometries([hand_geom], window_name=f"All Grid BBoxes")
+            # geoms = handobject.get_vis_geoms(idx=b)
+            o3d.visualization.draw_geometries(geoms, window_name=f"Batch {batch_idx} | Sample {b} ({obj_name}) | All Grids with Hand")
+            # o3d.visualization.draw_geometries([g['geometry'] for g in geoms], window_name=f"Batch {batch_idx} | Sample {b} ({obj_name}) | All Grids with Hand")
+            # o3d.visualization.draw_geometries([obj_geom])
+            # o3d.visualization.draw_geometries(pred_geoms)
+            break
 
-            # left_geoms, right_geoms = handobject.vis_grid_detail(obj_templates, idx=b, pt_idx=grid_idx)
-            # o3d.visualization.draw_geometries(
-            #     left_geoms,
-            #     window_name=f"Batch {batch_idx} | Sample {b} ({obj_name}) | Grid {grid_idx} — SDF")
-            # o3d.visualization.draw_geometries(
-            #     right_geoms,
-            #     window_name=f"Batch {batch_idx} | Sample {b} ({obj_name}) | Grid {grid_idx} — Contact")
+
+            # for grid_idx in range(10):
+            #     left_geoms, right_geoms = handobject.vis_grid_detail(obj_templates, idx=b, pt_idx=grid_idx)
+            #     # o3d.visualization.draw_geometries(
+            #     #     left_geoms,
+            #     #     window_name=f"Batch {batch_idx} | Sample {b} ({obj_name}) | Grid {grid_idx} — SDF")
+            #     o3d.visualization.draw_geometries(
+            #         right_geoms[1:],
+            #         window_name=f"Batch {batch_idx} | Sample {b} ({obj_name}) | Grid {grid_idx} — Contact")
+
+            #     o3d.visualization.draw_geometries(
+            #         [right_geoms[0]],
+            #         window_name=f"Batch {batch_idx} | Sample {b} ({obj_name}) | Grid {grid_idx} — Contact")
+
 
 
 @hydra.main(config_path="../config", config_name="gridae")
@@ -169,16 +224,20 @@ def vis_local_grid_interact(cfg):
     hand_faces = mano_layer.th_faces.numpy()
     dm.prepare_data()
     phase = 'test'
-    dm.setup(phase)
+    dm.setup('test')
     # train_loader = dm.train_dataloader()
     if phase == 'validate' or phase == 'train':
         loader = dm.val_dataloader()
+        train_dataset = dm.train_set
+        print("training dataset size:", len(train_dataset))
         dataset = dm.val_set
+        print("validation dataset size:", len(dataset))
     else:
         loader = dm.test_dataloader()
         dataset = dm.test_set
+        print(f"test dataset size: {len(dataset)}")
     # test_loader = dm.test_dataloader()
-    print(f"{phase} dataset size: {len(dataset)}")
+    return
     for batch_idx, batch in tqdm(enumerate(loader), total=len(loader), desc=f"Visualizing {phase} data"):
         grid_data = torch.cat([batch['gridSDF'], batch['gridContact'], batch['gridHandCSE']], dim=-1)  # (B, K, K, K, C)
         batch_size = grid_data.shape[0]
@@ -434,88 +493,88 @@ def vis_part_contact():
 
     # tx, tz = np.meshgrid(np.linspace(-0.01, 0.01, 16), np.linspace(-0.01, 0.01, 16))
     # trans = np.stack([tx.flatten(), np.zeros_like(tx.flatten()), tz.flatten()], axis=-1)  # (256, 3)
-    ts = np.linspace(0, 0.01, 16)
-    rots = np.linspace(0, np.pi, 16)
+    # ts = np.linspace(0, 0.01, 16)
+    # rots = np.linspace(0, np.pi, 16)
 
-    cache_path = 'tmp/vis_part_contact_error_grids.npz'
-    if os.path.exists(cache_path):
-        print(f"Loading cached error grids from {cache_path}")
-        cache = np.load(cache_path)
-        error2d_grid = cache['error2d_grid']
-        error3d_grid = cache['error3d_grid']
-    else:
-        all_axes = np.concatenate((np.eye(3), -np.eye(3)))
-        error2d_grid = np.zeros((16, 16))
-        error3d_grid = np.zeros((16, 16))
-        for i, j in tqdm([(i, j) for i in range(16) for j in range(16)], total=16*16):
-            for axx in all_axes:
-                R = axis_angle_to_matrix(torch.from_numpy(axx * rots[i])).numpy()
-                rotated_verts = (R @ tip_verts.T).T
-                for axx in all_axes:
-                    t = axx * ts[j]
-                    transformed_verts = rotated_verts + t
-                    transformed_mesh = trimesh.Trimesh(vertices=transformed_verts, faces=tip_faces_local)
-                    contact2d = pts_to_contact(pts2d, transformed_mesh, dist_to_contact2d)
-                    error2d = np.mean(np.abs(contact2d - gt_contact2d))
-                    error2d_grid[i, j] += error2d
-                    contact3d = pts_to_contact(pts3d, transformed_mesh, dist_to_contact3d)
-                    error3d = np.mean(np.abs(contact3d - gt_contact3d))
-                    error3d_grid[i, j] += error3d
-            error2d_grid[i, j] /= len(all_axes) ** 2
-            error3d_grid[i, j] /= len(all_axes) ** 2
-        os.makedirs('tmp', exist_ok=True)
-        np.savez(cache_path, error2d_grid=error2d_grid, error3d_grid=error3d_grid)
-        print(f"Saved error grids to {cache_path}")
+    # cache_path = 'tmp/vis_part_contact_error_grids.npz'
+    # if os.path.exists(cache_path):
+    #     print(f"Loading cached error grids from {cache_path}")
+    #     cache = np.load(cache_path)
+    #     error2d_grid = cache['error2d_grid']
+    #     error3d_grid = cache['error3d_grid']
+    # else:
+    #     all_axes = np.concatenate((np.eye(3), -np.eye(3)))
+    #     error2d_grid = np.zeros((16, 16))
+    #     error3d_grid = np.zeros((16, 16))
+    #     for i, j in tqdm([(i, j) for i in range(16) for j in range(16)], total=16*16):
+    #         for axx in all_axes:
+    #             R = axis_angle_to_matrix(torch.from_numpy(axx * rots[i])).numpy()
+    #             rotated_verts = (R @ tip_verts.T).T
+    #             for axx in all_axes:
+    #                 t = axx * ts[j]
+    #                 transformed_verts = rotated_verts + t
+    #                 transformed_mesh = trimesh.Trimesh(vertices=transformed_verts, faces=tip_faces_local)
+    #                 contact2d = pts_to_contact(pts2d, transformed_mesh, dist_to_contact2d)
+    #                 error2d = np.mean(np.abs(contact2d - gt_contact2d))
+    #                 error2d_grid[i, j] += error2d
+    #                 contact3d = pts_to_contact(pts3d, transformed_mesh, dist_to_contact3d)
+    #                 error3d = np.mean(np.abs(contact3d - gt_contact3d))
+    #                 error3d_grid[i, j] += error3d
+    #         error2d_grid[i, j] /= len(all_axes) ** 2
+    #         error3d_grid[i, j] /= len(all_axes) ** 2
+    #     os.makedirs('tmp', exist_ok=True)
+    #     np.savez(cache_path, error2d_grid=error2d_grid, error3d_grid=error3d_grid)
+    #     print(f"Saved error grids to {cache_path}")
 
-    use_3d_plot = True
-    if use_3d_plot:
-        rot_grid, t_grid = np.meshgrid(rots, ts * 1000)  # t_grid in mm
+    # use_3d_plot = True
+    # if use_3d_plot:
+    #     rot_grid, t_grid = np.meshgrid(rots, ts * 1000)  # t_grid in mm
 
-        from matplotlib.colors import LinearSegmentedColormap
-        cmap_2d = LinearSegmentedColormap.from_list('blue_solid', ['#2A5E8C', '#2A5E8C'])
-        cmap_3d = LinearSegmentedColormap.from_list('red_solid', ['#D9564A', '#D9564A'])
+    #     from matplotlib.colors import LinearSegmentedColormap
+    #     cmap_2d = LinearSegmentedColormap.from_list('blue_solid', ['#2A5E8C', '#2A5E8C'])
+    #     cmap_3d = LinearSegmentedColormap.from_list('red_solid', ['#D9564A', '#D9564A'])
 
-        fig = plt.figure(figsize=(9, 6))
-        ax = fig.add_subplot(1, 1, 1, projection='3d')
-        ax.plot_surface(rot_grid, t_grid, error2d_grid * 1000, cmap=cmap_2d, edgecolor='#2A5E8C', linewidth=0.3, alpha=0.7)
-        ax.plot_surface(rot_grid, t_grid, error3d_grid * 1000, cmap=cmap_3d, edgecolor='#D9564A', linewidth=0.3, alpha=0.7)
-        ax.view_init(elev=20, azim=140, roll=0)
-        ax.xaxis.pane.fill = False
-        ax.yaxis.pane.fill = False
-        ax.zaxis.pane.fill = False
-        ax.xaxis.pane.set_edgecolor('none')
-        ax.yaxis.pane.set_edgecolor('none')
-        ax.zaxis.pane.set_edgecolor('none')
-        ax.grid(False)
-        ax.set_xlabel('Rotation error (rad)')
-        ax.set_ylabel('Translation error (mm)')
-        ax.set_zlabel('Avg. distance error (mm)')
-        ax.set_title('Contact map error: 2D vs 3D')
-        from matplotlib.patches import Patch
-        legend_handles = [Patch(facecolor='#2A5E8C', label='2D'), Patch(facecolor='#D9564A', label='3D')]
-        ax.legend(handles=legend_handles)
-    else:
-        rot_ticks = [f'{r:.1f}' for r in rots[::3]]
-        t_ticks = [f'{t*1000:.1f}' for t in ts[::3]]
+    #     fig = plt.figure(figsize=(9, 6))
+    #     ax = fig.add_subplot(1, 1, 1, projection='3d')
+    #     ax.plot_surface(rot_grid, t_grid, error2d_grid * 1000, cmap=cmap_2d, edgecolor='#2A5E8C', linewidth=0.3, alpha=0.7)
+    #     ax.plot_surface(rot_grid, t_grid, error3d_grid * 1000, cmap=cmap_3d, edgecolor='#D9564A', linewidth=0.3, alpha=0.7)
+    #     ax.view_init(elev=20, azim=140, roll=0)
+    #     ax.xaxis.pane.fill = False
+    #     ax.yaxis.pane.fill = False
+    #     ax.zaxis.pane.fill = False
+    #     ax.xaxis.pane.set_edgecolor('none')
+    #     ax.yaxis.pane.set_edgecolor('none')
+    #     ax.zaxis.pane.set_edgecolor('none')
+    #     ax.grid(False)
+    #     ax.set_xlabel('Rotation error (rad)')
+    #     ax.set_ylabel('Translation error (mm)')
+    #     ax.set_zlabel('Avg. distance error (mm)')
+    #     ax.set_title('Contact map error: 2D vs 3D')
+    #     from matplotlib.patches import Patch
+    #     legend_handles = [Patch(facecolor='#2A5E8C', label='2D'), Patch(facecolor='#D9564A', label='3D')]
+    #     ax.legend(handles=legend_handles)
+    # else:
+    #     rot_ticks = [f'{r:.1f}' for r in rots[::3]]
+    #     t_ticks = [f'{t*1000:.1f}' for t in ts[::3]]
 
-        vmin = min(error2d_grid.min(), error3d_grid.min()) * 1000
-        vmax = max(error2d_grid.max(), error3d_grid.max()) * 1000
+    #     vmin = min(error2d_grid.min(), error3d_grid.min()) * 1000
+    #     vmax = max(error2d_grid.max(), error3d_grid.max()) * 1000
 
-        fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
-        im0 = axes[0].imshow(error2d_grid * 1000, origin='lower', aspect='auto',
-                             cmap='Blues', vmin=vmin, vmax=vmax,
-                             extent=[rots[0], rots[-1], ts[0]*1000, ts[-1]*1000])
-        axes[0].set_xlabel('Rotation error (rad)')
-        axes[0].set_ylabel('Translation error (mm)')
-        axes[0].set_title('2D contact map')
-        fig.colorbar(im0, ax=axes[0], label='Avg. distance error (mm)')
+    #     fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
+    #     im0 = axes[0].imshow(error2d_grid * 1000, origin='lower', aspect='auto',
+    #                          cmap='Blues', vmin=vmin, vmax=vmax,
+    #                          extent=[rots[0], rots[-1], ts[0]*1000, ts[-1]*1000])
+    #     axes[0].set_xlabel('Rotation error (rad)')
+    #     axes[0].set_ylabel('Translation error (mm)')
+    #     axes[0].set_title('2D contact map')
+    #     fig.colorbar(im0, ax=axes[0], label='Avg. distance error (mm)')
 
-        im1 = axes[1].imshow(error3d_grid * 1000, origin='lower', aspect='auto',
-                             cmap='Reds', vmin=vmin, vmax=vmax,
-                             extent=[rots[0], rots[-1], ts[0]*1000, ts[-1]*1000])
-        axes[1].set_xlabel('Rotation error (rad)')
-        axes[1].set_title('3D contact map')
-        fig.colorbar(im1, ax=axes[1], label='Avg. distance error (mm)')
+    #     im1 = axes[1].imshow(error3d_grid * 1000, origin='lower', aspect='auto',
+    #                          cmap='Reds', vmin=vmin, vmax=vmax,
+    #                          extent=[rots[0], rots[-1], ts[0]*1000, ts[-1]*1000])
+    #     axes[1].set_xlabel('Rotation error (rad)')
+    #     axes[1].set_title('3D contact map')
+    #     fig.colorbar(im1, ax=axes[1], label='Avg. distance error (mm)')
 
     # plt.tight_layout()
     # plt.show()
@@ -528,10 +587,10 @@ def vis_part_contact():
     o3d_pts3d.points = o3d.utility.Vector3dVector(pts3d)
     o3d_pts3d.colors = o3d.utility.Vector3dVector(hm_cmap(dist_to_contact3d(gt_contact3d))[:,:3])  # color by contact value
 
-    tip_o3dmesh = o3dmesh(tip_verts, tip_faces_local, color="#F27141")
+    tip_o3dmesh = o3dmesh(tip_verts, tip_faces_local, color="#F29A8D")
     # frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.05)
     obj_mesh = o3d.geometry.TriangleMesh.create_box(0.02, 0.02, 0.01)
-    obj_mesh.paint_uniform_color(parse_hex_color("#2A5E8C"))
+    obj_mesh.paint_uniform_color(parse_hex_color("#6293A8"))
     obj_mesh.compute_vertex_normals()
     obj_mesh.translate([-0.01, -0.01, -0.01])
 
@@ -548,8 +607,29 @@ def vis_part_contact():
     # )
     # tip_o3dmesh_cropped = o3dmesh(clipped_verts, clipped_faces, color="#F27141")
 
-    o3d.visualization.draw_geometries([tip_o3dmesh, obj_mesh, o3d_pts2d, bbox],
-                                      window_name="Fingertip Part Contact Visualization")
+    import math
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(window_name="Fingertip Part Contact Visualization", width=640, height=480)
+    for g in [tip_o3dmesh, obj_mesh, o3d_pts3d, bbox]:
+        vis.add_geometry(g)
+    # Camera: on -Y side, looking toward +Y with 30° downward pitch.
+    d = 0.04  # scene is in [-0.01, 0.01] range
+    eye = np.array([0.0, -d, d * math.tan(math.radians(30))])
+    gaze = -eye / np.linalg.norm(eye)
+    world_up = np.array([0.0, 0.0, 1.0])
+    right = np.cross(gaze, world_up); right /= np.linalg.norm(right)
+    up = np.cross(right, gaze)
+    R = np.stack([right, -up, gaze], axis=0)
+    t = -R @ eye
+    extrinsic = np.eye(4)
+    extrinsic[:3, :3] = R
+    extrinsic[:3,  3] = t
+    cam = o3d.camera.PinholeCameraParameters()
+    cam.intrinsic = o3d.camera.PinholeCameraIntrinsic(640, 480, 525, 525, 320, 240)
+    cam.extrinsic = extrinsic
+    vis.get_view_control().convert_from_pinhole_camera_parameters(cam, allow_arbitrary=True)
+    vis.run()
+    vis.destroy_window()
 
 
 @hydra.main(config_path="../config", config_name="mlcdiff", version_base=None)
@@ -611,8 +691,94 @@ def test_ho3d_dataloader(cfg):
         )
 
 
+def _plot_error_curve(ax, sigmas, errors, gt_errors, ylabel, title):
+    """
+    Plot mean ± std of errors over sigmas, with a flat GT baseline.
+
+    :param ax: matplotlib Axes
+    :param sigmas: (11,) sigma values for x-axis
+    :param errors: (N_samples, 11) predicted errors per sigma
+    :param gt_errors: (N_samples,) ground-truth errors (sigma-independent)
+    :param ylabel: y-axis label string
+    :param title: plot title string
+    """
+    mean = errors.mean(axis=0)          # (11,)
+    std  = errors.std(axis=0)           # (11,)
+    gt_mean = gt_errors.mean()
+    gt_std  = gt_errors.std()
+
+    ax.errorbar(sigmas, mean, yerr=std, marker='o', capsize=4, label='Predicted')
+    # GT is sigma-independent: draw as a horizontal band
+    ax.axhline(gt_mean, color='C1', linestyle='--', label='GT')
+    ax.axhspan(gt_mean - gt_std, gt_mean + gt_std, alpha=0.15, color='C1')
+
+    ax.set_xlabel('Sigma')
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend()
+
+
+def draw_error_plot():
+    data = np.load('tmp/errorlists/sigma_test_results.npz')
+    rec_errors    = data['rec_errors']     # (N_samples, 11)
+    pene          = data['pene']           # (N_samples, 11)
+    gt_rec_errors = data['gt_rec_errors']  # (N_samples,)
+    gt_pene       = data['gt_pene']        # (N_samples,)
+    sigmas        = data['sigmas']         # (11,)
+
+    # Double-column A4 column width ≈ 88 mm = 3.46 in; 3:2 landscape → height 2.31 in.
+    # Font sizes tuned so rendered text is ~11 pt at column width in the paper.
+    FIG_W, FIG_H = 3.46, 3.46 * 2 / 3
+    plt.rcParams.update({
+        'font.size': 9,
+        'axes.titlesize': 9,
+        'axes.labelsize': 9,
+        'xtick.labelsize': 8,
+        'ytick.labelsize': 8,
+        'legend.fontsize': 8,
+        'lines.linewidth': 1.0,
+        'lines.markersize': 3,
+    })
+
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
+    _plot_error_curve(ax, sigmas, rec_errors, gt_rec_errors,
+                      ylabel='Reconstruction Error (mm)', title='Rec Error vs Sigma')
+    fig.tight_layout()
+    fig.savefig('tmp/errorlists/rec_error.svg', format='svg')
+    # plt.show()
+
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
+    _plot_error_curve(ax, sigmas, pene * 1000, gt_pene * 1000,
+                      ylabel='Penetration (mm)', title='Penetration vs Sigma')
+    fig.tight_layout()
+    fig.savefig('tmp/errorlists/penetration.svg', format='svg')
+    # plt.show()
+
+
+
+def crop_predicted_images(src, dst):
+    """
+    Walk src for all predicted.png files, crop the upper half, and save to dst.
+    Each output is named after its immediate parent subfolder, e.g. batch_0000_wineglass.png.
+    """
+    from PIL import Image
+    import glob
+
+    os.makedirs(dst, exist_ok=True)
+    paths = sorted(glob.glob(os.path.join(src, "**", "predicted.png"), recursive=True))
+    print(f"Found {len(paths)} predicted.png files.")
+    for path in paths:
+        subfolder = os.path.basename(os.path.dirname(path))
+        img = Image.open(path)
+        w, h = img.size
+        cropped = img.crop((0, 0, w, h * 6 // 20))
+        out_path = os.path.join(dst, f"{subfolder}.png")
+        cropped.save(out_path)
+        print(f"  Saved {out_path}")
+
+
 if __name__ == "__main__":
-    test_ho3d_dataloader()
+    # test_ho3d_dataloader()
     # vis_msdf_data_sample()
     # test_obj()
     # vis_local_grid_interact()
@@ -621,3 +787,10 @@ if __name__ == "__main__":
     # test_hoi4d_datamodule()
     # test_manolayer()
     # vis_part_contact()
+    # draw_error_plot()
+    crop_predicted_images(
+        # src="logs/wandb_logs/wandb/run-20260304_193313-u16fpzdr/files/test_images",
+        # dst="tmp/grab",
+        src="logs/wandb_logs/wandb/run-20260304_154407-m6y2sopw/files/test_images",
+        dst="tmp/ho3d",
+    )

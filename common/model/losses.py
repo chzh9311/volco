@@ -33,5 +33,12 @@ def kl_div_normal_muvar(mu, logvar):
     return kl
 
 
-def masked_rec_loss(pred, gt, mask):
-    return torch.sum(torch.norm((pred - gt)[mask], dim=-1)) / (mask.sum() + 1e-6) # in m
+def masked_rec_loss(pred, gt, mask, reduction='mean'):
+    loss = torch.norm((pred - gt)[mask], dim=-1)
+    if reduction == 'mean':
+        return loss.sum() / (mask.sum() + 1e-6) # in m
+    elif reduction == 'sum':
+        return loss.sum()
+    else:
+        loss = torch.sum(torch.norm((pred - gt) * mask.unsqueeze(-1), dim=-1), dim=-1) / (mask.sum(dim=-1) + 1e-6)
+        return loss
