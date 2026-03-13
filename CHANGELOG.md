@@ -2,8 +2,19 @@
 ## [Unreleased]
 
 
+<a name="v1.2.0"></a>
+## [v1.2.0] - 2026-03-13
+### Bug Fixes
+- Correct the data augmenetation pipeline: 12 rotations -> 24 rotations.
+- Removed unnecessary visualization that causes dataloader crash.
+
+### Features
+- Update visualization code.
+- Ablation study code.
+
+
 <a name="v1.1.1"></a>
-## [v1.1.1] - 2026-02-27
+## [v1.1.1] - 2026-02-28
 ### Bug Fixes
 - Enable training on lower version cuda.
 - Minor fixes on to make the diffusion training pipeline work with the new ae.
@@ -125,7 +136,8 @@
 - Enable dumping local grids first.
 
 
-[Unreleased]: /compare/v1.1.1...HEAD
+[Unreleased]: /compare/v1.2.0...HEAD
+[v1.2.0]: /compare/v1.1.1...v1.2.0
 [v1.1.1]: /compare/v1.1.0...v1.1.1
 [v1.1.0]: /compare/v1.0.1...v1.1.0
 [v1.0.1]: /compare/v1.0.0...v1.0.1
