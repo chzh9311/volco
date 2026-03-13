@@ -885,18 +885,33 @@ def compute_point_bps(hand_verts, half_size=0.5, resolution=64):
 def grid_reorder_id_and_rot(kernel_size, id):
     """
     Reorder the 3D grid points according to the rotation along axis by angle.
-    :param k: int, the resolution of the grid
-    :param id: 0 - 11, the rotation id.
+    :param kernel_size: int, the resolution of the grid
+    :param id: 0 - 23, the rotation id covering all 24 axis-aligned cube symmetries.
+        0 -  3: +X face up (identity base),          spin 0/90/180/270° around X
+        4 -  7: +Y face up (90° around Y),           spin 0/90/180/270° around X
+        8 - 11: +Z face up (90° around Z),           spin 0/90/180/270° around X
+       12 - 15: -X face up (180° around Y),          spin 0/90/180/270° around X
+       16 - 19: -Y face up (270° around Y = -90°),   spin 0/90/180/270° around X
+       20 - 23: -Z face up (270° around Z = -90°),   spin 0/90/180/270° around X
     """
     idxs = np.arange(kernel_size ** 3).reshape(kernel_size, kernel_size, kernel_size)
     if id < 4:
         R1 = np.eye(3)
-    if 4 <= id < 8:
-        idxs = reorder_3d(idxs, 1, 1) # First rotate 90 degree along y
+    elif id < 8:
+        idxs = reorder_3d(idxs, 1, 1)  # 90° around Y
         R1 = rodrigues_rot(np.array([0, 1, 0]), np.pi / 2)
-    elif 8 <= id < 12:
-        idxs = reorder_3d(idxs, 2, 1) # First rotate 90 degree along z
+    elif id < 12:
+        idxs = reorder_3d(idxs, 2, 1)  # 90° around Z
         R1 = rodrigues_rot(np.array([0, 0, 1]), np.pi / 2)
+    elif id < 16:
+        idxs = reorder_3d(idxs, 1, 2)  # 180° around Y
+        R1 = rodrigues_rot(np.array([0, 1, 0]), np.pi)
+    elif id < 20:
+        idxs = reorder_3d(idxs, 1, 3)  # 270° around Y
+        R1 = rodrigues_rot(np.array([0, 1, 0]), 3 * np.pi / 2)
+    else:  # id < 24
+        idxs = reorder_3d(idxs, 2, 3)  # 270° around Z
+        R1 = rodrigues_rot(np.array([0, 0, 1]), 3 * np.pi / 2)
 
     idxs = reorder_3d(idxs, 0, id % 4)
     R = rodrigues_rot(np.array([1, 0, 0]), (id % 4) * np.pi / 2) @ R1

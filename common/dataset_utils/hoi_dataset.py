@@ -90,7 +90,7 @@ class BaseHOIDataset(Dataset):
     def __getitem__(self, idx):
         sample = {}
         if self.augment:
-            reorder_id, Rot = grid_reorder_id_and_rot(self.msdf_kernel_size, np.random.randint(0, 12))
+            reorder_id, Rot = grid_reorder_id_and_rot(self.msdf_kernel_size, np.random.randint(0, 24))
             sample['aug_rot'] = Rot
         if not self.object_only:
             fname_path = self.frame_names[idx].split('/')
@@ -230,14 +230,16 @@ class BaseHOIDataset(Dataset):
 
         else:
             obj_name = self.test_objects[idx]
-            # obj_sample_pts = self.obj_info[obj_name]['samples'] # n_sample x 3
-            # obj_sample_normals = self.obj_info[obj_name]['sample_normals'] # n_sample x 3
+            obj_sample_pts = self.obj_info[obj_name]['samples'] # n_sample x 3
+            obj_sample_normals = self.obj_info[obj_name]['sample_normals'] # n_sample x 3
             ## For testing, return object with random rotations. The rng is set to make sure
             ## each idx generates fixed rotation.
             # obj_rot = R.identity()
 
             sample.update({
                 'objName': obj_name,
+                'objSamplePts': obj_sample_pts,
+                'objSampleNormals': obj_sample_normals,
             })
 
         obj_com = self.obj_info[obj_name]['CoM']
@@ -343,107 +345,3 @@ def canonical_hand_parts(mano_layer, num_samples, batch_size, betas=None, device
     all_part_sample_normals = np.stack(all_part_sample_normals, axis=0)
 
     return all_part_sample_pts, all_part_sample_normals, cano_joints
-
-
-class BaseOnlineHOIDataset(BaseHOIDataset):
-    def __init__(self, cfg, split):
-        super(BaseOnlineHOIDataset, self).__init__(cfg, split)
-
-    def __getitem__(self, idx):
-        if self.split in ['train', 'val'] or self.test_gt:
-            fname_path = self.frame_names[idx].split('/')
-            sbj_id = fname_path[2]
-            obj_name = fname_path[3].split('_')[0]
-            obj_com = self.obj_info[obj_name]['CoM']
-            obj_inertia = self.obj_info[obj_name]['inertia']
-            obj_rot = self.object_data['global_orient'][idx]
-            obj_trans = self.object_data['transl'][idx]
-            obj_mesh = self.simp_obj_mesh[obj_name]
-
-            ## Transform the vertices:
-            objR = axis_angle_to_matrix(obj_rot).detach().cpu().numpy()
-            if self.dataset_name == 'grab':
-                objR = objR.T
-            objt = obj_trans.detach().cpu().numpy()
-
-            if self.hand_sides is not None:
-                hand_side = self.hand_sides[idx]
-                if hand_side == 'left':
-                    # change the hand
-                    hmodels = self.lh_models
-                    hdata = self.lh_data
-                else:
-                    hmodels = self.rh_models
-                    hdata = self.rh_data
-            else:
-                hand_side = 'right'
-                hmodels = self.rh_models
-                hdata = self.rh_data
-
-            obj_verts = obj_mesh['verts'] @ objR.T + objt[np.newaxis, :]
-            obj_faces = obj_mesh['faces']
-            transformed_obj_mesh = trimesh.Trimesh(vertices=obj_verts, faces=obj_faces, process=False)
-
-            sample = {
-                'frameName': '/'.join(fname_path[2:]),
-                'objName': obj_name,
-                'sbjId': sbj_id,
-                'objTrans': objt,
-                'objRot': Rotation.from_matrix(objR).as_rotvec(),
-                'handSide': hand_side,
-                'objCoM': obj_com,
-                'objInertia': obj_inertia,
-                'objMesh': transformed_obj_mesh,
-            }
-
-            hand_rot = hdata['global_orient'][idx]
-            hand_pose = hdata['fullpose'][idx].flatten()
-            hand_trans = hdata['transl'][idx]
-            handV, handJ, part_T = hmodels[sbj_id](
-                th_pose_coeffs=torch.cat([hand_rot, hand_pose], dim=0).unsqueeze(0),
-                th_trans=hand_trans.unsqueeze(0))
-            handV, handJ, part_T = handV[0].detach().cpu().numpy(), handJ[0].detach().cpu().numpy(), part_T[0].detach().cpu().numpy()
-            ## canonical joints for calculating transformations (use cache if available)
-            if hasattr(self, 'cano_joints_cache') and sbj_id in self.cano_joints_cache:
-                canoJ = self.cano_joints_cache[sbj_id]
-            else:
-                _, canoJt, _ = hmodels[sbj_id](th_pose_coeffs=torch.zeros(1, 48))
-                canoJ = canoJt[0].detach().cpu().numpy()
-            # model = ManoLayer(mano_root=self.mano_root, flat_hand_mean=True)
-            hand_part_ids = torch.argmax(hmodels[sbj_id].th_weights, dim=-1).detach().cpu().numpy()
-
-            handN = trimesh.Trimesh(handV, hmodels[sbj_id].th_faces).vertex_normals
-
-            sample.update({
-                'handRot': hand_rot,
-                'handPose': hand_pose,
-                'handTrans': hand_trans,
-                'handVerts': handV,
-                'handJoints': handJ,
-                # 'handPartT': part_T,
-                'handPartIds': hand_part_ids,
-                'handNormals': np.stack(handN, axis=0),
-                'canoJoints': canoJ,
-            })
-
-        else:
-            obj_name = self.test_objects[idx]
-            obj_sample_pts = self.obj_info[obj_name]['samples'] # n_sample x 3
-            obj_sample_normals = self.obj_info[obj_name]['sample_normals'] # n_sample x 3
-            ## For testing, return object with random rotations. The rng is set to make sure
-            ## each idx generates fixed rotation.
-            # obj_rot = R.identity()
-
-            sample = {
-                'objName': obj_name,
-                'objSamplePts': obj_sample_pts,
-                'objSampleNormals': obj_sample_normals,
-                # 'objRot': obj_rot.as_rotvec(),
-            }
-
-            if self.msdf_path is not None:
-                obj_msdf = self.obj_info[obj_name]['msdf'].copy() ## K^3 + 3
-                obj_msdf[:, :-3] = obj_msdf[:, :-3] / self.msdf_scale / np.sqrt(3) # Normalize SDF
-                sample['objMsdf'] = obj_msdf
-
-        return sample

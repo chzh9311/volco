@@ -20,7 +20,7 @@ from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
 from scipy.spatial.transform import Rotation
 
 from common.manopth.manopth.manolayer import ManoLayer
-from .hoi_dataset import BaseHOIDataset, BaseOnlineHOIDataset, get_kine_parent, canonical_hand_parts
+from .hoi_dataset import BaseHOIDataset
 from .local_grid_dataset import LocalGridDataset
 
 jointsMapManoToSimple = [0,
