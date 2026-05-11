@@ -327,7 +327,7 @@ def geom_to_img_o3d(vis_geoms, w, h, scale=1, concat_axis=1):
     return np.concatenate(result_imgs, axis=concat_axis)
 
 
-def geom_to_img(vis_geoms, w, h, scale=0.07, half_range=None, concat_axis=1):
+def geom_to_img(vis_geoms, w, h, scale=0.07, half_range=None, concat_axis=1, point_size=1):
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
     import matplotlib
     matplotlib.use('Agg')  # Use non-interactive backend
@@ -486,6 +486,16 @@ def geom_to_img(vis_geoms, w, h, scale=0.07, half_range=None, concat_axis=1):
 
     ret_img = np.concatenate(result_imgs, axis=concat_axis)
     return ret_img
+
+
+def geom_to_img_unified(vis_geoms, w, h, scale=1, concat_axis=1, backend='open3d'):
+    """
+    Unified rendering wrapper.  backend='open3d' uses geom_to_img_o3d (hardware
+    renderer); backend='matplotlib' uses geom_to_img (software renderer).
+    """
+    if backend == 'matplotlib':
+        return geom_to_img(vis_geoms, w=w, h=h, scale=scale, concat_axis=concat_axis)
+    return geom_to_img_o3d(vis_geoms, w=w, h=h, scale=scale, concat_axis=concat_axis)
 
 
 def vis_nn_bps(hand_mesh, bps, nn_idx):
@@ -894,13 +904,13 @@ def visualize_local_grid(msdf, kernel_size, point_idx, obj_mesh):
     )
 
 
-def visualize_grid_contact(contact_pts, pt_contact, grid_scale, obj_mesh, w, h, bbox_alpha=0.2):
+def visualize_grid_contact(contact_pts, pt_contact, grid_scale, obj_mesh, w, h, bbox_alpha=0.2, backend='open3d'):
     bboxes = create_bbox_geomtries(contact_pts, grid_scale, pt_contact, alpha=bbox_alpha)
     obj_geom = o3dmesh_from_trimesh(obj_mesh, color=[0.7, 0.7, 0.7])
     # Wrap bboxes with alpha values
     bbox_geoms = [{'geometry': bbox, 'alpha': bbox_alpha} for bbox in bboxes]
     vis_geoms = [obj_geom] + bbox_geoms
-    img = geom_to_img(vis_geoms, w=w, h=h, scale=0.5)
+    img = geom_to_img_unified(vis_geoms, w=w, h=h, scale=0.5, backend=backend)
     return img, vis_geoms
 
 
@@ -935,7 +945,7 @@ def create_bbox_geomtries(msdf_center, grid_scale, contact=None, alpha=0.3):
 
 
 def visualize_recon_hand_w_object(hand_verts, hand_verts_mask, hand_faces, obj_mesh, part_ids, msdf_center=None, grid_scale=None, h=500, w=500,
-                                  concat_axis=1):
+                                  concat_axis=1, backend='open3d'):
     masked_hand_geometries = extract_masked_mesh_components(
         hand_verts=hand_verts,
         hand_faces=hand_faces,
@@ -948,7 +958,7 @@ def visualize_recon_hand_w_object(hand_verts, hand_verts_mask, hand_faces, obj_m
     # bbox_geometries = create_bbox_geomtries(msdf_center, grid_scale)
 
     vis_geoms = masked_hand_geometries + [obj_o3d_mesh] # + bbox_geometries
-    img = geom_to_img_o3d(vis_geoms, w=w, h=h, scale=0.9, concat_axis=concat_axis)
+    img = geom_to_img_unified(vis_geoms, w=w, h=h, scale=0.9, concat_axis=concat_axis, backend=backend)
     return img, vis_geoms
 
 

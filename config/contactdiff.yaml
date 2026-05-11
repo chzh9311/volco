@@ -45,6 +45,7 @@ test:
     - "Simulation Displacement"
     - "Penetration Depth"
     - "Intersection Volume"
+    - "Contact Area"
     - "Contact Ratio"
     - "Cluster Size"
     - "Entropy"

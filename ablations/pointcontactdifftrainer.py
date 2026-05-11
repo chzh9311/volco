@@ -1,4 +1,5 @@
 import os.path as osp
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -229,6 +230,8 @@ class PointContactDiffTrainer(L.LightningModule):
 
         ## Testing metrics
         self.runtime = 0
+        self.diffusion_times = []
+        self.optimization_times = []
         if not self.debug:
             # Access logger.experiment to trigger WandbLogger's lazy wandb.init()
             # _ = self.logger.experiment
@@ -237,7 +240,7 @@ class PointContactDiffTrainer(L.LightningModule):
             # Initialize W&B table for test images
             self.test_images_table = wandb.Table(columns=[
                 "batch_idx", "obj_name", "sampled_grasp",
-                "sim_displacement", "penetration_depth", "intersection_volume"
+                "sim_displacement", "penetration_depth", "intersection_volume", "contact_area"
             ])
 
     def on_train_epoch_start(self):
@@ -300,7 +303,17 @@ class PointContactDiffTrainer(L.LightningModule):
 
         self.vis_geoms = []
         self._proj_step = 0
-        samples = self.diffusion.sample(self.model, input_data, k=n_samples, proj_fn=None, progress=True)
+        if self.device.type == 'cuda':
+            _t0, _t1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            _t0.record()
+            samples = self.diffusion.sample(self.model, input_data, k=n_samples, proj_fn=None, progress=True)
+            _t1.record()
+            torch.cuda.synchronize()
+            self.diffusion_times.append(_t0.elapsed_time(_t1) / 1000.0)  # ms -> s
+        else:
+            _t0 = time.perf_counter()
+            samples = self.diffusion.sample(self.model, input_data, k=n_samples, proj_fn=None, progress=True)
+            self.diffusion_times.append(time.perf_counter() - _t0)
 
         # Visualize hand geometries at every 100 steps along with object
         if self.vis_geoms:
@@ -316,6 +329,9 @@ class PointContactDiffTrainer(L.LightningModule):
         # sample_latent = samples ## B x latent
         self.mano_layer.to(self.device)
 
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize()
+        _opt_t0 = time.perf_counter()
         with torch.enable_grad():
             contact, cse = samples.split([1, self.cse_dim], dim=-1)
             thin_objects = ['wineglass', 'mug', 'fryingpan']
@@ -334,6 +350,9 @@ class PointContactDiffTrainer(L.LightningModule):
             #             grid_scale=self.cfg.msdf.scale, w_repulsive=self.cfg.pose_optimizer.w_repulsive)
 
         handV, handJ, _ = self.mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize()
+        self.optimization_times.append(time.perf_counter() - _opt_t0)
 
         handV, handJ = handV.detach().cpu().numpy(), handJ.detach().cpu().numpy()
 
@@ -399,8 +418,8 @@ class PointContactDiffTrainer(L.LightningModule):
 
         if self.debug:
             ho_geoms = pred_ho.get_vis_geoms(idx=vis_idx)
-            o3d.visualization.draw_geometries([pcd] + [g['geometry'].translate((0, 0.25, 0)) if 'geometry' in g else g.translate((0, 0.25, 0)) for g in ho_geoms],
-                                            window_name='Predicted Hand-Object')
+            # o3d.visualization.draw_geometries([pcd] + [g['geometry'].translate((0, 0.25, 0)) if 'geometry' in g else g.translate((0, 0.25, 0)) for g in ho_geoms],
+            #                                 window_name='Predicted Hand-Object')
         else:
             pred_img = pred_ho.vis_img(idx=vis_idx, h=400, w=400)
             pred_cmap_img, pred_pmap_img = handobject.vis_maps(idx=vis_idx, w=400, h=400)
@@ -412,12 +431,12 @@ class PointContactDiffTrainer(L.LightningModule):
 
         # Concatenate all sample images horizontally
 
-        if hasattr(self.logger, 'experiment'):
+        if hasattr(self.logger, 'experiment') and not self.debug:
             if hasattr(self.logger.experiment, 'add_image'):
                 # TensorBoardLogger
                 global_step = self.current_epoch * len(eval(f'self.trainer.datamodule.test_dataloader()')) + batch_idx
                 self.logger.experiment.add_image(f'test/Sampled_grasp', pred_img_grid, global_step, dataformats='HWC')
-            elif hasattr(self.logger.experiment, 'log') and not self.debug:
+            elif hasattr(self.logger.experiment, 'log'):
                 # WandbLogger - add row to table
                 self.test_images_table.add_data(
                     batch_idx,
@@ -425,7 +444,8 @@ class PointContactDiffTrainer(L.LightningModule):
                     wandb.Image(pred_img_grid),
                     float(np.mean(result.get("Simulation Displacement", [0]))),
                     float(np.mean(result.get("Penetration Depth", [0]))),
-                    float(np.mean(result.get("Intersection Volume", [0])))
+                    float(np.mean(result.get("Intersection Volume", [0]))),
+                    float(np.mean(result.get("Contact Area", [0]))),
                 )
             # o3d.visualization.draw(pred_geoms)
             # o3d.visualization.draw(gt_geoms + [g['geometry'].translate((0, 0.25, 0)) if 'geometry' in g else g for g in pred_geoms])
@@ -588,6 +608,16 @@ class PointContactDiffTrainer(L.LightningModule):
         ## Calculate diversity
         sample_joints = np.concatenate(self.sample_joints, axis=0)
         # run_time = np.concatenate(run_time, axis=0)
+
+        avg_diff = float(np.mean(self.diffusion_times)) if self.diffusion_times else 0.0
+        avg_opt  = float(np.mean(self.optimization_times)) if self.optimization_times else 0.0
+        final_metrics.update({
+            'Inference Time/Diffusion (s)':    avg_diff,
+            'Inference Time/Optimization (s)': avg_opt,
+            'Inference Time/Total (s)':         avg_diff + avg_opt,
+        })
+        print(f"[Timing] Diffusion: {avg_diff:.3f}s | Optimization: {avg_opt:.3f}s | Total: {avg_diff + avg_opt:.3f}s")
+
         entropy, cluster_size, entropy_2, cluster_size_2 = calc_diversity(sample_joints)
         final_metrics.update({
             "Entropy": entropy.item(),

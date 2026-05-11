@@ -1,5 +1,6 @@
 import os
 import os.path as osp
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -19,7 +20,7 @@ from common.model.pose_optimizer import optimize_pose_by_contact, optimize_pose_
 
 from .lgcdifftrainer import LGCDiffTrainer
 from common.model.handobject import HandObject, recover_hand_verts_from_contact
-from common.utils.vis import o3dmesh, o3dmesh_from_trimesh, geom_to_img, visualize_recon_hand_w_object, visualize_grid_contact
+from common.utils.vis import o3dmesh, o3dmesh_from_trimesh, geom_to_img, visualize_recon_hand_w_object, visualize_grid_contact, geom_to_img_unified
 from common.msdf.utils.msdf import get_grid, calc_local_grid_all_pts_gpu
 from common.evaluation.eval_fns import calculate_metrics
 from einops import rearrange
@@ -275,7 +276,17 @@ class GraspDiffTrainer(LGCDiffTrainer):
 
         self.vis_geoms = []
         self._proj_step = 0
-        samples = self.diffusion.sample(self.model, input_data, k=n_samples, proj_fn=None, progress=True)
+        if self.device.type == 'cuda':
+            _t0, _t1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            _t0.record()
+            samples = self.diffusion.sample(self.model, input_data, k=n_samples, proj_fn=None, progress=True)
+            _t1.record()
+            torch.cuda.synchronize()
+            self.diffusion_times.append(_t0.elapsed_time(_t1) / 1000.0)  # ms -> s
+        else:
+            _t0 = time.perf_counter()
+            samples = self.diffusion.sample(self.model, input_data, k=n_samples, proj_fn=None, progress=True)
+            self.diffusion_times.append(time.perf_counter() - _t0)
 
         hand_latent, grid_latent = samples[:, :self.cfg.generator.unet.d_y], samples[:, self.cfg.generator.unet.d_y:].view(n_samples, n_grids, -1)
 
@@ -305,6 +316,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
         pred_grid_cse = recon_lg_contact[..., 1:].reshape(n_samples, -1, self.cse_dim)
         pred_targetWverts = self.hand_cse.emb2Wvert(pred_grid_cse.view(n_samples, -1, self.cse_dim))
 
+        _opt_t0 = time.perf_counter()
         if self.cfg.pose_optimizer.name == 'hand_ae':
             pred_hand_verts, pred_verts_mask = recover_hand_verts_from_contact(
                 self.hand_cse, None,
@@ -317,12 +329,21 @@ class GraspDiffTrainer(LGCDiffTrainer):
             recon_trans = nrecon_trans * 0.2
             handV, handJ, _ = self.mano_layer(recon_pose, th_betas=recon_betas, th_trans=recon_trans)
         elif self.cfg.pose_optimizer.name == 'lg_base':
+            recon_hand_verts, recon_verts_mask = recover_hand_verts_from_contact(
+                self.hand_cse, None,
+                pred_grid_contact.reshape(n_samples, -1), pred_grid_cse.reshape(n_samples, -1, self.cse_dim),
+                grid_coords=grid_coords.reshape(n_samples, -1, 3),
+                chunk_size=10
+            )
+            recon_params, init_handV, init_handJ = self.hand_ae.decode(hand_latent)
             with torch.enable_grad():
-                mano_trans, global_pose, mano_pose, mano_shape = optimize_pose_wrt_local_grids(
+                params, contact_mask = optimize_pose_wrt_local_grids(
                             self.mano_layer, grid_centers=obj_msdf_center, target_pts=grid_coords.view(n_samples, -1, 3),
-                            target_W_verts=pred_targetWverts, weights=pred_grid_contact,
+                            target_W_verts=pred_targetWverts, weights=pred_grid_contact, grid_sdfs=obj_msdf_grid.squeeze(1),
+                            dist2contact_fn=self.grid_dist_to_contact, recon_hand_verts=recon_hand_verts, recon_verts_mask=recon_verts_mask,
                             n_iter=self.cfg.pose_optimizer.n_opt_iter, lr=self.cfg.pose_optimizer.opt_lr,
                             grid_scale=self.cfg.msdf.scale, w_repulsive=self.cfg.pose_optimizer.w_repulsive)
+                mano_trans, global_pose, mano_pose, mano_shape = params
             
             handV, handJ, _ = self.mano_layer(torch.cat([global_pose, mano_pose], dim=1), th_betas=mano_shape, th_trans=mano_trans)
         elif self.cfg.pose_optimizer.name == 'hybrid':
@@ -367,6 +388,10 @@ class GraspDiffTrainer(LGCDiffTrainer):
             # handV, handJ = init_handV, init_handJ
         else:
             recon_params, handV, handJ = self.hand_ae.decode(hand_latent)
+
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize()
+        self.optimization_times.append(time.perf_counter() - _opt_t0)
 
         handV, handJ = handV.detach().cpu().numpy(), handJ.detach().cpu().numpy()
 
@@ -418,78 +443,82 @@ class GraspDiffTrainer(LGCDiffTrainer):
         else:
             pred_hand_verts, pred_verts_mask = recon_hand_verts, recon_verts_mask
 
-        # Visualize all samples
-        img_side = 800
-        recon_imgs = []
-        pred_imgs = []
-        init_imgs = []
-        contact_mask_imgs = []
-        for vis_idx in range(n_samples):
-            recon_img, pred_geoms = visualize_recon_hand_w_object(
-                hand_verts=pred_hand_verts[vis_idx].detach().cpu().numpy(),
-                hand_verts_mask=pred_verts_mask[vis_idx].detach().cpu().numpy(),
-                hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
-                obj_mesh=handobject.vis_obj_models[vis_idx],
-                part_ids=handobject.hand_part_ids,
-                msdf_center=obj_msdf_center[vis_idx].detach().cpu().numpy(),
-                grid_scale=self.cfg.msdf.scale,
-                h=img_side, w=img_side)
-            recon_imgs.append(recon_img)
+        vis_result = self.cfg.test.get('vis_result', True)
 
-            # Visualize contact mask
-            contact_img, contact_geoms = visualize_grid_contact(
-                contact_pts=obj_msdf_center[vis_idx].detach().cpu().numpy(),
-                pt_contact=contact_mask[vis_idx].detach().cpu().numpy().astype(float),
-                grid_scale=self.cfg.msdf.scale,
-                obj_mesh=handobject.vis_obj_models[vis_idx],
-                w=img_side, h=img_side)
-            contact_mask_imgs.append(contact_img)
+        if vis_result:
+            backend = self.cfg.get('vis_backend', 'open3d')
+            img_side = 800
+            recon_imgs = []
+            pred_imgs = []
+            init_imgs = []
+            contact_mask_imgs = []
+            for vis_idx in range(n_samples):
+                recon_img, pred_geoms = visualize_recon_hand_w_object(
+                    hand_verts=pred_hand_verts[vis_idx].detach().cpu().numpy(),
+                    hand_verts_mask=pred_verts_mask[vis_idx].detach().cpu().numpy(),
+                    hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
+                    obj_mesh=handobject.vis_obj_models[vis_idx],
+                    part_ids=handobject.hand_part_ids,
+                    msdf_center=obj_msdf_center[vis_idx].detach().cpu().numpy(),
+                    grid_scale=self.cfg.msdf.scale,
+                    h=img_side, w=img_side, backend=backend)
+                recon_imgs.append(recon_img)
 
-            if self.debug:
-                # print(result)
-                ho_geoms = pred_ho.get_vis_geoms(idx=vis_idx)
-                contact_geoms_offset = [g['geometry'].translate((0, 0.5, 0)) if isinstance(g, dict) else g.translate((0, 0.5, 0)) for g in contact_geoms]
-                o3d.visualization.draw_geometries(pred_geoms + [g['geometry'].translate((0, 0.25, 0)) if isinstance(g, dict) else g.translate((0, 0.25, 0)) for g in ho_geoms] + contact_geoms_offset, window_name='Predicted Hand-Object')
-            else:
-                pred_img = pred_ho.vis_img(idx=vis_idx, h=img_side, w=img_side)
-                pred_imgs.append(pred_img)
-                init_img = init_ho.vis_img(idx=vis_idx, h=img_side, w=img_side)
-                init_imgs.append(init_img)
+                contact_img, contact_geoms = visualize_grid_contact(
+                    contact_pts=obj_msdf_center[vis_idx].detach().cpu().numpy(),
+                    pt_contact=contact_mask[vis_idx].detach().cpu().numpy().astype(float),
+                    grid_scale=self.cfg.msdf.scale,
+                    obj_mesh=handobject.vis_obj_models[vis_idx],
+                    w=img_side, h=img_side, backend=backend)
+                contact_mask_imgs.append(contact_img)
 
-        # Concatenate all sample images vertically
-        recon_img_grid = np.concatenate(recon_imgs, axis=0)
-        contact_mask_img_grid = np.concatenate(contact_mask_imgs, axis=0)
-        init_img_grid = np.concatenate(init_imgs, axis=0)
-        if not self.debug:
-            pred_img_grid = np.concatenate(pred_imgs, axis=0)
+                if self.debug:
+                    ho_geoms = pred_ho.get_vis_geoms(idx=vis_idx)
+                    contact_geoms_offset = [g['geometry'].translate((0, 0.5, 0)) if isinstance(g, dict) else g.translate((0, 0.5, 0)) for g in contact_geoms]
+                    # o3d.visualization.draw_geometries(pred_geoms + [g['geometry'].translate((0, 0.25, 0)) if isinstance(g, dict) else g.translate((0, 0.25, 0)) for g in ho_geoms] + contact_geoms_offset, window_name='Predicted Hand-Object')
+                else:
+                    pred_img = pred_ho.vis_img(idx=vis_idx, h=img_side, w=img_side, backend=backend)
+                    pred_imgs.append(pred_img)
+                    init_img = init_ho.vis_img(idx=vis_idx, h=img_side, w=img_side, backend=backend)
+                    init_imgs.append(init_img)
 
-        if hasattr(self.logger, 'experiment'):
-            if hasattr(self.logger.experiment, 'add_image'):
+            recon_img_grid = np.concatenate(recon_imgs, axis=0)
+            contact_mask_img_grid = np.concatenate(contact_mask_imgs, axis=0)
+            if not self.debug:
+                pred_img_grid = np.concatenate(pred_imgs, axis=0)
+                init_img_grid = np.concatenate(init_imgs, axis=0)
+
+        if hasattr(self.logger, 'experiment') and not self.debug:
+            metric_row = [
+                float(np.mean(result.get("Simulation Displacement", [0]))),
+                float(np.mean(result.get("Penetration Depth", [0]))),
+                float(np.mean(result.get("Intersection Volume", [0]))),
+                float(np.mean(result.get("Contact Area", [0]))),
+            ]
+            if hasattr(self.logger.experiment, 'add_image') and vis_result:
                 # TensorBoardLogger
                 global_step = self.current_epoch * len(eval(f'self.trainer.datamodule.test_dataloader()')) + batch_idx
                 self.logger.experiment.add_image(f'test/Surrounding_hands', recon_img_grid, global_step, dataformats='HWC')
                 self.logger.experiment.add_image(f'test/Initial_hands', init_img_grid, global_step, dataformats='HWC')
-                # self.logger.experiment.add_image(f'test/Sampled_grasp', pred_img_grid, global_step, dataformats='HWC')
-            elif hasattr(self.logger.experiment, 'log') and not self.debug:
-                # WandbLogger - save images to disk then add row to table
-                from PIL import Image as PILImage
-                img_dir = os.path.join(self.logger.experiment.dir, 'test_images', f'batch_{batch_idx:04d}_{obj_name}')
-                os.makedirs(img_dir, exist_ok=True)
-                def _save(arr, name):
-                    path = os.path.join(img_dir, name)
-                    PILImage.fromarray((arr * 255).clip(0, 255).astype(np.uint8)).save(path)
-                    return wandb.Image(path)
-                self.test_images_table.add_data(
-                    batch_idx,
-                    obj_name,
-                    _save(recon_img_grid, 'surrounding.png'),
-                    _save(pred_img_grid, 'predicted.png'),
-                    _save(contact_mask_img_grid, 'contact_mask.png'),
-                    _save(init_img_grid, 'initial.png'),
-                    float(np.mean(result.get("Simulation Displacement", [0]))),
-                    float(np.mean(result.get("Penetration Depth", [0]))),
-                    float(np.mean(result.get("Intersection Volume", [0])))
-                )
+            elif hasattr(self.logger.experiment, 'log'):
+                # WandbLogger
+                if vis_result:
+                    from PIL import Image as PILImage
+                    img_dir = os.path.join(self.logger.experiment.dir, 'test_images', f'batch_{batch_idx:04d}_{obj_name}')
+                    os.makedirs(img_dir, exist_ok=True)
+                    def _save(arr, name):
+                        path = os.path.join(img_dir, name)
+                        PILImage.fromarray((arr * 255).clip(0, 255).astype(np.uint8)).save(path)
+                        return wandb.Image(path)
+                    img_row = [
+                        _save(recon_img_grid, 'surrounding.png'),
+                        _save(pred_img_grid, 'predicted.png'),
+                        _save(contact_mask_img_grid, 'contact_mask.png'),
+                        _save(init_img_grid, 'initial.png'),
+                    ]
+                else:
+                    img_row = []
+                self.test_images_table.add_data(batch_idx, obj_name, *img_row, *metric_row)
             # o3d.visualization.draw(pred_geoms)
             # o3d.visualization.draw(gt_geoms + [g['geometry'].translate((0, 0.25, 0)) if 'geometry' in g else g for g in pred_geoms])
 
@@ -501,14 +530,46 @@ class GraspDiffTrainer(LGCDiffTrainer):
 
         ## Testing metrics
         self.runtime = 0
+        self.diffusion_times = []
+        self.optimization_times = []
         if hasattr(self.logger, 'experiment') and hasattr(self.logger.experiment, 'log') and not self.debug:
             import wandb
+            vis_result = self.cfg.test.get('vis_result', True)
+            img_cols = ['Surrounding_hands', 'Predicted_hands', 'Contact_mask', 'Initial_hands'] if vis_result else []
             self.test_images_table = wandb.Table(columns=[
                 'batch_idx', 'obj_name',
-                'Surrounding_hands', 'Predicted_hands', 'Contact_mask', 'Initial_hands',
-                'simu_disp', 'pene_depth', 'intersect_vol',
+                *img_cols,
+                'simu_disp', 'pene_depth', 'intersect_vol', 'contact_area',
             ])
 
     def on_test_epoch_end(self):
-        if hasattr(self.logger, 'experiment') and hasattr(self.logger.experiment, 'log') and not self.debug:
-            self.logger.experiment.log({'test/results': self.test_images_table})
+        # Compute quality metrics and diversity (same as parent, without logging the table)
+        final_metrics = {}
+        for m in self.cfg.test.criteria:
+            if "Entropy" not in m and "Cluster Size" not in m:
+                all_metrics = np.concatenate([res[m] for res in self.all_results], axis=0)
+                final_metrics[f"{m}/mean"] = np.mean(all_metrics).item()
+                final_metrics[f"{m}/std"]  = np.std(all_metrics).item()
+                final_metrics[f"{m}/min"]  = np.min(all_metrics).item()
+                final_metrics[f"{m}/max"]  = np.max(all_metrics).item()
+
+        # Timing
+        avg_diff = float(np.mean(self.diffusion_times)) if self.diffusion_times else 0.0
+        avg_opt  = float(np.mean(self.optimization_times)) if self.optimization_times else 0.0
+        final_metrics.update({
+            'Inference Time/Diffusion (s)':    avg_diff,
+            'Inference Time/Optimization (s)': avg_opt,
+            'Inference Time/Total (s)':         avg_diff + avg_opt,
+        })
+        print(f"[Timing] Diffusion: {avg_diff:.3f}s | Optimization: {avg_opt:.3f}s | Total: {avg_diff + avg_opt:.3f}s")
+
+        from common.evaluation.eval_fns import calc_diversity
+        sample_joints = np.concatenate(self.sample_joints, axis=0)
+        entropy, cluster_size, entropy_2, cluster_size_2 = calc_diversity(sample_joints)
+        final_metrics.update({
+            "Entropy": entropy.item(), "Cluster Size": cluster_size.item(),
+            "Canonical Entropy": entropy_2.item(), "Canonical Cluster Size": cluster_size_2.item(),
+        })
+        if not self.debug:
+            wandb.log(final_metrics, commit=False)
+            wandb.log({'test/results': self.test_images_table})

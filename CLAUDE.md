@@ -14,4 +14,5 @@ Currently, the script used for training is `scripts/train_diffusion.py`. The res
 
 ## Code ignores
 
-Code under `prev_sota` folder are the code copied from previous methods, and do not need review.
+* Code under `prev_sota` folder are the code copied from previous methods, and do not need review.
+* Files under `tmp` are temporarily stored here. If not specified, do not review.

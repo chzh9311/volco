@@ -116,7 +116,7 @@ def main(cfg):
         print('total keys in ckpt:', len(sd.keys()))
         load_pl_ckpt(gridae, sd, prefix='grid_ae.')
         load_pl_ckpt(model, sd, prefix='model.')
-        # load_pl_ckpt(hand_ae, sd, prefix='hand_ae.')
+        load_pl_ckpt(hand_ae, sd, prefix='hand_ae.')
         unused_keys = [k for k in sd.keys() if not (k.startswith('grid_ae.') or k.startswith('model.') or k.startswith('hand_ae.'))]
         print(f'Unused keys in ckpt: {unused_keys}')
 

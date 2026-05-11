@@ -42,10 +42,12 @@ test:
   n_processes: 20
   n_samples: 20
   batch_size: ${test.n_samples}
+  vis_result: true  # set to false to skip rendering and remove image columns from wandb table
   base_criteria:
     - "Simulation Displacement"
     - "Penetration Depth"
     - "Intersection Volume"
+    - "Contact Area"
     - "Contact Ratio"
     - "Cluster Size"
     - "Entropy"
@@ -77,6 +79,7 @@ ckpt_path: ${generator.checkpoint_path}
 optimizer: adamw
 
 debug: true
+vis_backend: open3d  # open3d (hardware) or matplotlib (software)
 
 hydra:
   job:

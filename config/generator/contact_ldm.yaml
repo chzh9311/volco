@@ -48,4 +48,4 @@ mdm:
   model_var_type: 'FIXED_SMALL'  # 'LEARNED', 'FIXED_SMALL', 'FIXED_LARGE', 'LEARNED_RANGE'
   rescale_timesteps: false
 
-checkpoint_path:
+checkpoint_path: logs/checkpoints/ablations/pointcontact/best.ckpt

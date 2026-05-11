@@ -12,7 +12,7 @@ from common.manopth.manopth.manolayer import ManoLayer
 from common.utils.physics import StableLoss
 from common.utils.vis import (parse_hex_color, o3dmesh_from_trimesh, o3d_arrow, geom_to_img, extract_masked_mesh_components,
                                visualize_grid_contact, visualize_local_grid_with_hand, visualize_recon_hand_w_object,
-                               geom_to_img_o3d, clip_mesh_to_aabb)
+                               geom_to_img_unified, clip_mesh_to_aabb)
 from common.utils.misc import linear_normalize
 from common.utils.geometry import (
         flip_x_axis,
@@ -1036,7 +1036,7 @@ class HandObject:
 
     #     return self.obj_verts, self.obj_normals, hand_params
 
-    def vis_img(self, idx:int, h:int=600, w:int=800, draw_maps=False, **kwargs) -> np.ndarray:
+    def vis_img(self, idx:int, h:int=600, w:int=800, draw_maps=False, backend='open3d', **kwargs) -> np.ndarray:
         """
         Visualize the hand-object as an image.
         pts: N x 3
@@ -1047,15 +1047,15 @@ class HandObject:
         scale = 0.9
         # Separate geometries into three groups
         hand_obj_geoms = [g for g in vis_geoms if g['name'] in ['hand', 'object']]
-        img_hand_obj = geom_to_img_o3d(hand_obj_geoms, w, h, scale=scale, concat_axis=kwargs.get('concat_axis', 1))
+        img_hand_obj = geom_to_img_unified(hand_obj_geoms, w, h, scale=scale, concat_axis=kwargs.get('concat_axis', 1), backend=backend)
 
         if draw_maps:
             contact_geoms = [g for g in vis_geoms if g['name'] == 'obj_contacts']
             part_geoms = [g for g in vis_geoms if g['name'] == 'obj_parts']
 
             # Render each group separately
-            img_contacts = geom_to_img(contact_geoms, w, h, scale=scale)
-            img_parts = geom_to_img(part_geoms, w, h, scale=scale)
+            img_contacts = geom_to_img_unified(contact_geoms, w, h, scale=scale, backend=backend)
+            img_parts = geom_to_img_unified(part_geoms, w, h, scale=scale, backend=backend)
             ret_img = np.concatenate([img_hand_obj, img_contacts, img_parts], axis=0)
         else:
             ret_img = img_hand_obj

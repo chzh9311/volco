@@ -395,29 +395,34 @@ class LGCDiffTrainer(L.LightningModule):
         return loss_dict['total_loss']
     
     def _visualize_contact_comparison(self, obj_msdf_center, pred_grid_contact, gt_rec_grid_contact, handobject, vis_idx):
+        backend = self.cfg.get('vis_backend', 'open3d')
         pred_contact_img, _ = visualize_grid_contact(
             contact_pts=obj_msdf_center[vis_idx].detach().cpu().numpy(),
             pt_contact=pred_grid_contact[vis_idx].detach().cpu().numpy(),
-            grid_scale=self.cfg.msdf.scale, obj_mesh=handobject.vis_obj_models[vis_idx], w=400, h=400)
+            grid_scale=self.cfg.msdf.scale, obj_mesh=handobject.vis_obj_models[vis_idx], w=400, h=400,
+            backend=backend)
         gt_rec_contact_img, _ = visualize_grid_contact(
             contact_pts=obj_msdf_center[vis_idx].detach().cpu().numpy(),
             pt_contact=gt_rec_grid_contact[vis_idx].detach().cpu().numpy(),
-            grid_scale=self.cfg.msdf.scale, obj_mesh=handobject.vis_obj_models[vis_idx], w=400, h=400)
+            grid_scale=self.cfg.msdf.scale, obj_mesh=handobject.vis_obj_models[vis_idx], w=400, h=400,
+            backend=backend)
         gt_grid_contact = rearrange(handobject.ml_contact[vis_idx, ..., 0], 'n k1 k2 k3 -> n (k1 k2 k3)').max(dim=-1)[0]
         gt_contact_img, _ = visualize_grid_contact(
             contact_pts=obj_msdf_center[vis_idx].detach().cpu().numpy(),
             pt_contact=gt_grid_contact.detach().cpu().numpy(),
-            grid_scale=self.cfg.msdf.scale, obj_mesh=handobject.vis_obj_models[vis_idx], w=400, h=400)
+            grid_scale=self.cfg.msdf.scale, obj_mesh=handobject.vis_obj_models[vis_idx], w=400, h=400,
+            backend=backend)
         return np.concatenate([gt_contact_img, gt_rec_contact_img, pred_contact_img], axis=0)
 
     def _visualize_hand_comparison(self, pred_hand_verts, pred_verts_mask, gt_rec_hand_verts, gt_rec_verts_mask,
                                    handobject, obj_msdf_center, rot, vis_idx):
+        backend = self.cfg.get('vis_backend', 'open3d')
         common_kwargs = dict(
             hand_faces=self.mano_layer.th_faces.detach().cpu().numpy(),
             obj_mesh=handobject.vis_obj_models[vis_idx],
             msdf_center=obj_msdf_center[vis_idx].detach().cpu().numpy(),
             part_ids=handobject.hand_part_ids,
-            grid_scale=self.cfg.msdf.scale, h=400, w=400)
+            grid_scale=self.cfg.msdf.scale, h=400, w=400, backend=backend)
         pred_img, _ = visualize_recon_hand_w_object(
             hand_verts=pred_hand_verts[vis_idx].detach().cpu().numpy(),
             hand_verts_mask=pred_verts_mask[vis_idx].detach().cpu().numpy(), **common_kwargs)
@@ -464,7 +469,7 @@ class LGCDiffTrainer(L.LightningModule):
             # Initialize W&B table for test images
             self.test_images_table = wandb.Table(columns=[
                 "batch_idx", "obj_name", "surrounding_hands", "sampled_grasp",
-                "sim_displacement", "penetration_depth", "intersection_volume"
+                "sim_displacement", "penetration_depth", "contact_area", "intersection_volume"
             ])
 
     def on_train_epoch_start(self):
@@ -651,6 +656,7 @@ class LGCDiffTrainer(L.LightningModule):
         )
 
         # Visualize all samples
+        backend = self.cfg.get('vis_backend', 'open3d')
         recon_imgs = []
         pred_imgs = []
         for vis_idx in range(n_samples):
@@ -662,14 +668,14 @@ class LGCDiffTrainer(L.LightningModule):
                 part_ids=handobject.hand_part_ids,
                 msdf_center=obj_msdf_center[vis_idx].detach().cpu().numpy(),
                 grid_scale=self.cfg.msdf.scale,
-                h=400, w=400)
+                h=400, w=400, backend=backend)
             recon_imgs.append(recon_img)
 
             if self.debug:
                 ho_geoms = pred_ho.get_vis_geoms(idx=vis_idx)
                 o3d.visualization.draw_geometries(pred_geoms + [g['geometry'].translate((0, 0.25, 0)) if 'geometry' in g else g.translate((0, 0.25, 0)) for g in ho_geoms], window_name='Predicted Hand-Object')
             else:
-                pred_img = pred_ho.vis_img(idx=vis_idx, h=400, w=400)
+                pred_img = pred_ho.vis_img(idx=vis_idx, h=400, w=400, backend=backend)
                 pred_imgs.append(pred_img)
 
         # Concatenate all sample images horizontally
@@ -692,7 +698,8 @@ class LGCDiffTrainer(L.LightningModule):
                     wandb.Image(pred_img_grid),
                     float(np.mean(result.get("Simulation Displacement", [0]))),
                     float(np.mean(result.get("Penetration Depth", [0]))),
-                    float(np.mean(result.get("Intersection Volume", [0])))
+                    float(np.mean(result.get("Contact Area", [0]))),
+                    float(np.mean(result.get("Intersection Volume", [0]))),
                 )
             # o3d.visualization.draw(pred_geoms)
             # o3d.visualization.draw(gt_geoms + [g['geometry'].translate((0, 0.25, 0)) if 'geometry' in g else g for g in pred_geoms])

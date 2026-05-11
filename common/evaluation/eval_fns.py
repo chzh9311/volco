@@ -89,9 +89,9 @@ def parallel_calculate_metrics(params:dict):
     result = {}
 
     # Downsample mesh at the beginning to avoid memory overflow in all metrics
-    MAX_FACES = 10000  # Adjust based on memory constraints
-    if len(params['obj_model'].faces) > MAX_FACES:
-        params['obj_model'] = downsample_mesh(params['obj_model'], target_faces=MAX_FACES)
+    # MAX_FACES = 10000  # Adjust based on memory constraints
+    # if len(params['obj_model'].faces) > MAX_FACES:
+    #     params['obj_model'] = downsample_mesh(params['obj_model'], target_faces=MAX_FACES)
 
     if "Simulation Displacement" in metrics:
         ## decomposition
@@ -108,6 +108,11 @@ def parallel_calculate_metrics(params:dict):
     if "Penetration Depth" in metrics:
         pen_depth = pene_depth(obj_mesh=params['obj_model'], hand_verts=params['hand_model'].vertices) * 100 # to cm
         result["Penetration Depth"] = pen_depth
+
+    if "Contact Area" in metrics:
+        hand_mesh = trimesh.Trimesh(vertices=params['hand_model'].vertices, faces=params['hand_model'].faces)
+        contact_area = calculate_contact_area(hand_mesh, params['obj_model'], threshold=0.005) * 10000 # to cm2
+        result["Contact Area"] = contact_area
 
     if "Pierce-Free Rate" in metrics:
         try:
@@ -297,6 +302,26 @@ def calculate_fscore(gt, pr, th=0.01):
     else:
         fscore = 0.0
     return fscore, precision, recall
+
+
+def calculate_contact_area(hand_mesh, obj_mesh, threshold=0.005):
+    # Closest point on hand for each object vertex
+    closest_pts, dists, closest_tri_ids = trimesh.proximity.closest_point(hand_mesh, obj_mesh.vertices)
+    close_mask = dists < threshold
+
+    # Interpolate hand normals at closest points using barycentric coordinates
+    hand_normals = hand_mesh.face_normals[closest_tri_ids]
+    obj_normals = obj_mesh.vertex_normals
+
+    # Contact requires normals to be opposing (dot product < 0)
+    dots = np.einsum('ij,ij->i', obj_normals, hand_normals)
+    contact_verts = set(np.where(close_mask & (dots < 0))[0])
+
+    area = 0.0
+    for face in obj_mesh.faces:
+        if contact_verts.intersection(face):
+            area += trimesh.triangles.area([obj_mesh.vertices[face]])[0]
+    return area
 
 
 ## From FreiHand
