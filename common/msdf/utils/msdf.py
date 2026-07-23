@@ -547,6 +547,12 @@ def nn_dist_to_mesh_gpu(points, hand_verts, faces):
         face_indices: torch.LongTensor (N,), nearest face indices
         closest_points: torch.Tensor (N, 3), nearest points on mesh surface
     """
+    # Kaolin's CUDA kernel dispatches on the points' dtype and requires the mesh
+    # to match, so cast both to float32 (points may arrive as float64 from the
+    # dataset). kaolin 0.18.0 handles float32 natively.
+    points = points.float()
+    hand_verts = hand_verts.float()
+
     # Kaolin expects batched input: (B, N, 3) and (B, F, 3, 3)
     face_verts = index_vertices_by_faces(
         hand_verts.unsqueeze(0), faces

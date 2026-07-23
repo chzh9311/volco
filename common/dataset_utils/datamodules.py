@@ -47,16 +47,15 @@ class LocalGridDataModule(LightningDataModule):
         """
         data_cfg = deepcopy(self.cfg)
         for split in ['train', 'val', 'test']:
-            local_grid_file = osp.join(self.preprocessed_dir, self.dataset_name, split, f'local_grid_values_{self.cfg.msdf.scale*1000:.1f}mm.h5')
+            local_grid_dir = osp.join(self.preprocessed_dir, self.dataset_name, f'local_grid_{self.cfg.msdf.kernel_size}_{self.cfg.msdf.scale*1000:.1f}mm')
+            local_grid_file = osp.join(local_grid_dir, f'{split}.h5')
             if not osp.exists(local_grid_file):
-                os.makedirs(osp.join(self.preprocessed_dir, self.dataset_name, split), exist_ok=True)
+                os.makedirs(local_grid_dir, exist_ok=True)
                 self.base_dataset = getattr(self.module, self.cfg.dataset_name.upper() + 'Dataset')(data_cfg, split, load_msdf=False, object_only=False)
                 loader = DataLoader(self.base_dataset, batch_size=64, shuffle=False, num_workers=8)
                 device = 'cuda' if torch.cuda.is_available() else 'cpu'
                 kernel_size = self.cfg.msdf.kernel_size
                 total_samples = len(self.base_dataset)
-
-                os.makedirs(osp.dirname(local_grid_file), exist_ok=True)
 
                 # Create HDF5 file with resizable datasets
                 n_sample_pts = self.cfg.n_sample_pts

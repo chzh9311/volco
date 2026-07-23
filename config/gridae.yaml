@@ -1,5 +1,5 @@
 defaults:
-  - msdf: sparse
+  - msdf: "128_4"
   - data: grab_local_grid
   - ae: gridae_128latent_v2
   - _self_
@@ -18,7 +18,7 @@ train:
     w_kl: 0.000001
     w_rec: 0.0
   rec_loss_start_epoch: null
-  vis_every_n_batches: 1000
+  vis_every_n_batches: 10000
   # resume_ckpt: logs/wandb_logs/LG3DContact/GRIDAE-64v2/epoch=4-wcserec.ckpt
   # pretrained_ckpt: logs/checkpoints/gridae/128latent/best-epoch=22-val/total_loss=0.0970.ckpt
   resume_ckpt: 

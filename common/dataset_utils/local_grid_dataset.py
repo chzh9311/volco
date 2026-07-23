@@ -35,8 +35,9 @@ class LocalGridDataset(Dataset):
         self.split = split
 
         # Load local grid data from H5 file
-        local_grid_file = osp.join(cfg.preprocessed_dir, self.dataset_name, split,
-                                   f'local_grid_values_{self.grid_scale*1000:.1f}mm.h5')
+        local_grid_file = osp.join(cfg.preprocessed_dir, self.dataset_name,
+                                   f'local_grid_{self.kernel_size}_{self.grid_scale*1000:.1f}mm',
+                                   f'{split}.h5')
         if not osp.exists(local_grid_file):
             raise FileNotFoundError(f"Local grid file not found: {local_grid_file}. Please run LocalGridDataModule.prepare_data() first.")
 
