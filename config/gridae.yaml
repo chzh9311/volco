@@ -1,7 +1,7 @@
 defaults:
   - msdf: "128_4"
   - data: grab_local_grid
-  - ae: gridae_128latent_v2
+  - ae: gridae_64latent_v2
   - _self_
 
 training_stage: "ae"

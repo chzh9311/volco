@@ -83,7 +83,13 @@ class GridDecoder3Dv2(nn.Module):
         super(GridDecoder3Dv2, self).__init__()
         self.h_dim0 = h_dims[0]
         self.num_layers = len(h_dims)
-        self.init_N = N // 2**(self.num_layers-1)
+        # Mirror the encoder's downsampling: for N==4 one upsample is a stride-1
+        # no-op, so one fewer doubling occurs. init_N must match the encoder's
+        # final spatial resolution.
+        num_upsamples = self.num_layers - 1
+        if N == 4:
+            num_upsamples -= 1
+        self.init_N = N // 2**num_upsamples
         if condition_dim is None:
             condition_dim = [0] * (self.num_layers + 1)
 
@@ -108,7 +114,11 @@ class GridDecoder3Dv2(nn.Module):
 
             # Pool layer (not used after the last layer group)
             if i < self.num_layers - 1:
-                self.upsample_layers.append(Deconv3D(out_channels, out_channels, kernel_size=2, stride=2, padding=0))
+                if N == 4 and i == self.num_layers - 2:
+                    ## Do not up sample in the last layer if N==4,
+                    self.upsample_layers.append(Deconv3D(out_channels, out_channels, kernel_size=1, stride=1, padding=0))
+                else:
+                    self.upsample_layers.append(Deconv3D(out_channels, out_channels, kernel_size=2, stride=2, padding=0))
 
         self.final_cse = nn.Conv3d(h_dims[-1], out_dim-1, kernel_size=1,
                             stride=1, padding=0)

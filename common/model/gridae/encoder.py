@@ -157,11 +157,21 @@ class GridEncoder3Dv2(nn.Module):
 
             # Pool layer (not used after the last layer group)
             if i < self.num_layers - 1:
-                # self.pool_layers.append(MaxPool3D(kernel_size=2))
-                ## Use strided conv for downsampling to restore the maximum information
-                self.downsample_layers.append(Conv3D(h_dims[i], h_dims[i], kernel_size=2, stride=2, padding=0))
+                if i == 0 and N == 4:
+                    # do not downsample:
+                    self.downsample_layers.append(Conv3D(h_dims[i], h_dims[i], kernel_size=1, stride=1, padding=0))
+                else:
+                    # self.pool_layers.append(MaxPool3D(kernel_size=2))
+                    ## Use strided conv for downsampling to restore the maximum information
+                    self.downsample_layers.append(Conv3D(h_dims[i], h_dims[i], kernel_size=2, stride=2, padding=0))
         
-        flattened_dim = h_dims[-1]*(N//2**(self.num_layers-1))**3
+        # Count the downsamples that actually halve the resolution. For N==4 the
+        # first downsample (i==0) is a stride-1 no-op, so one fewer halving occurs.
+        num_downsamples = self.num_layers - 1
+        if N == 4:
+            num_downsamples -= 1
+        final_N = N // 2**num_downsamples
+        flattened_dim = h_dims[-1]*final_N**3
         self.final_residual = MLPResStack(flattened_dim, expansion_factor=res_expansion, n_res_layers=n_res_layers)
         self.final_layer = nn.Sequential(
             # ResnetBlockFC(h_dims[-1]*(N//2**(self.num_layers-1))**3, feat_dim, 2 * feat_dim),
