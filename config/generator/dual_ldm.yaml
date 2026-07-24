@@ -22,7 +22,7 @@ unet:
   obj_feat_dim: ${add:1024,${generator.unet.context_dim}}  # pointfeat(1024) + obj_feat(${ae.obj_feat_dim})
   n_timesteps: ${generator.diffusion.timesteps}
   obj_encoder:
-    in_dim: 515 # ${add:3,${ae.obj_feat_dim}}
+    in_dim: ${add:${power:${msdf.kernel_size}, 3}, 3}
     hidden_dim: 256
     feat_dim: ${generator.unet.context_dim}
 

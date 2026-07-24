@@ -1,7 +1,9 @@
 defaults:
-  - msdf: sparse
+  # - msdf: sparse
+  - msdf: "128_4"
   - data: grab_multi_contact
-  - ae: gridae_128latent_v2
+  # - ae: gridae_128latent_v2
+  - ae: gridae_64latent_v2
   - hand_ae: handvae_16latent
   - generator: dual_ldm
   - pose_optimizer: hybrid
@@ -13,7 +15,7 @@ contact_unit: "grid"
 train:
   optimizer: "adamw"
   lr: 1e-4
-  batch_size: 48
+  batch_size: 64
   vis_every_n_batches: 1000
   augment: true
   loss_weights:

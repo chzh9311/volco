@@ -21,7 +21,7 @@ obj_in_dim: 1
 
 use_noncontact_grids: false
 # pretrained_weight: logs/checkpoints/gridae/128latent/best-epoch=16-val/total_loss=0.0948.ckpt
-pretrained_weight: logs/checkpoints/gridae/mlpres_v2/128latent-contactonly/best.ckpt
+pretrained_weight: logs/wandb_logs/LG3DContact/GridAEkernel4_64latent/checkpoints/best-epoch=18-val/total_loss=4.9372.ckpt
 
 msdf:
   num_grids: ${msdf.num_grids}

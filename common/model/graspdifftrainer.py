@@ -322,6 +322,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
                 self.hand_cse, None,
                 pred_grid_contact.reshape(n_samples, -1), pred_grid_cse.reshape(n_samples, -1, self.cse_dim),
                 grid_coords=grid_coords.reshape(n_samples, -1, 3),
+                mask_th=self.msdf_k / 4,
                 chunk_size=10
             )
             recon_param, _ = self.hand_ae(pred_hand_verts.permute(0, 2, 1), mask=pred_verts_mask.unsqueeze(1), is_training=False)
@@ -333,6 +334,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
                 self.hand_cse, None,
                 pred_grid_contact.reshape(n_samples, -1), pred_grid_cse.reshape(n_samples, -1, self.cse_dim),
                 grid_coords=grid_coords.reshape(n_samples, -1, 3),
+                mask_th=self.msdf_k / 4,
                 chunk_size=10
             )
             recon_params, init_handV, init_handJ = self.hand_ae.decode(hand_latent)
@@ -351,6 +353,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
                 self.hand_cse, None,
                 pred_grid_contact.reshape(n_samples, -1), pred_grid_cse.reshape(n_samples, -1, self.cse_dim),
                 grid_coords=grid_coords.reshape(n_samples, -1, 3),
+                mask_th=self.msdf_k / 4,
                 chunk_size=10
             )
             recon_params, init_handV, init_handJ = self.hand_ae.decode(hand_latent)
@@ -438,7 +441,8 @@ class GraspDiffTrainer(LGCDiffTrainer):
                 pred_grid_contact.reshape(n_samples, -1),
                 pred_grid_cse.reshape(n_samples, -1, self.cse_dim),
                 grid_coords=grid_coords.reshape(n_samples, -1, 3),
-                chunk_size=10  # Process in chunks of 10 to reduce memory peak
+                mask_th=self.msdf_k / 4,
+                chunk_size=10
             )
         else:
             pred_hand_verts, pred_verts_mask = recon_hand_verts, recon_verts_mask

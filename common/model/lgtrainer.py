@@ -96,6 +96,9 @@ class LGTrainer(L.LightningModule):
             self.log_dict(loss_dict, prog_bar=False, sync_dist=True, on_step=False, on_epoch=True)
         else:
             self.log_dict(loss_dict, prog_bar=False, sync_dist=True)
+            if batch_idx % self.cfg.train.log_every_n_batches == 0:
+                loss_str = ' | '.join(f'{k}: {v.item():.4f}' for k, v in loss_dict.items())
+                print(f'[epoch {self.current_epoch} | step {batch_idx}] {loss_str}', flush=True)
         if batch_idx % self.cfg[stage].vis_every_n_batches == 0 and batch_idx > 0:
             pred_grid_contact = recon_cgrid
             if stage == 'train':

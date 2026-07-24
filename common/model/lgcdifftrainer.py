@@ -448,6 +448,7 @@ class LGCDiffTrainer(L.LightningModule):
             self.hand_cse, None,
             sample_contact.reshape(batch_size, -1), sample_cse.reshape(batch_size, -1, self.cse_dim),
             grid_coords=grid_coords.reshape(batch_size, -1, 3),
+            mask_th=self.msdf_k / 4,
             chunk_size=10
         )
 
@@ -586,6 +587,7 @@ class LGCDiffTrainer(L.LightningModule):
                 self.hand_cse, None,
                 pred_grid_contact.reshape(n_samples, -1), pred_grid_cse.reshape(n_samples, -1, self.cse_dim),
                 grid_coords=grid_coords.reshape(n_samples, -1, 3),
+                mask_th=self.msdf_k / 4,
             )
             recon_param, _ = self.hand_ae(pred_hand_verts.permute(0, 2, 1), mask=pred_verts_mask.unsqueeze(1), is_training=False)
             nrecon_trans, recon_pose, recon_betas = torch.split(recon_param, [3, 48, 10], dim=1)
@@ -597,6 +599,7 @@ class LGCDiffTrainer(L.LightningModule):
                     self.hand_cse, None,
                     pred_grid_contact.reshape(n_samples, -1), pred_grid_cse.reshape(n_samples, -1, self.cse_dim),
                     grid_coords=grid_coords.reshape(n_samples, -1, 3),
+                    mask_th=self.msdf_k / 4,
                     chunk_size=10
                 )
                 obj_msdf_grid = handobject.obj_msdf[:, :, :self.msdf_k**3].view(-1, 1, self.msdf_k, self.msdf_k, self.msdf_k) # (B*N) x 1 x k x k x k
@@ -653,6 +656,7 @@ class LGCDiffTrainer(L.LightningModule):
             pred_grid_contact.reshape(n_samples, -1),
             pred_grid_cse.reshape(n_samples, -1, self.cse_dim),
             grid_coords=grid_coords.reshape(n_samples, -1, 3),
+            mask_th=self.msdf_k / 4,
         )
 
         # Visualize all samples

@@ -18,6 +18,7 @@ train:
     w_kl: 0.000001
     w_rec: 0.0
   rec_loss_start_epoch: null
+  log_every_n_batches: 100
   vis_every_n_batches: 10000
   # resume_ckpt: logs/wandb_logs/LG3DContact/GRIDAE-64v2/epoch=4-wcserec.ckpt
   # pretrained_ckpt: logs/checkpoints/gridae/128latent/best-epoch=22-val/total_loss=0.0970.ckpt

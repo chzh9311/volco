@@ -20,6 +20,7 @@ from common.utils.misc import set_seed, load_pl_ckpt
 from lightning.pytorch.callbacks import ModelCheckpoint
 
 OmegaConf.register_new_resolver("add", lambda x, y: x + y, replace=True)
+OmegaConf.register_new_resolver("power", lambda x, y: x ** y, replace=True)
 @hydra.main(version_base=None, config_path="../config", config_name="mlcdiff")
 def main(cfg):
     # Set seed for reproducibility FIRST
