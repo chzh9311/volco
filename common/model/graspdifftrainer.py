@@ -9,6 +9,7 @@ import open3d as o3d
 import trimesh
 from copy import copy
 import numpy as np
+import pickle
 # from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.pool import Pool
 import wandb
@@ -41,6 +42,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
             return self._global2local(hand_latent, grid_centers)
         
         object.__setattr__(self.model, 'global2local_fn', global2local)
+        self.pool = None
     
     def _global2local(self, hand_latent, obj_msdf):
         _, handV, handJ = self.hand_ae.decode(hand_latent)
@@ -185,6 +187,9 @@ class GraspDiffTrainer(LGCDiffTrainer):
             self.log_dict(loss_dict, prog_bar=True, sync_dist=True, on_step=False, on_epoch=True)
         else:
             self.log_dict(loss_dict, prog_bar=True, sync_dist=True)
+            # if batch_idx % self.cfg.train.log_every_n_batches == 0:
+            #     loss_str = ' | '.join(f'{k}: {v.item():.4f}' for k, v in loss_dict.items())
+            #     print(f'[epoch {self.current_epoch} | step {batch_idx}] {loss_str}', flush=True)
 
         if batch_idx % self.cfg[stage].vis_every_n_batches == 0:#  and batch_idx > 0:
             vis_idx = 0
@@ -253,9 +258,28 @@ class GraspDiffTrainer(LGCDiffTrainer):
         obj_mesh = trimesh.Trimesh(obj_mesh_dict['verts'], obj_mesh_dict['faces'])
         simp_obj_mesh = trimesh.Trimesh(simp_obj_mesh_dict['verts'], simp_obj_mesh_dict['faces'])
 
-        ## Test the reconstrucion 
+        ## Test the reconstrucion
         n_samples = self.cfg.test.get('n_samples', 1)
         handobject.load_from_batch_obj_only(batch, n_samples, obj_template=obj_mesh, vis_obj_template=simp_obj_mesh, obj_hulls=obj_hulls)
+
+        use_cache = self.cfg.test.get('use_cache', False)
+        cache_path = osp.join('tmp', 'grab', f'VolCoDiff_{obj_name}.pkl')
+        if use_cache:
+            # Reuse previously saved hand results instead of rerunning diffusion + pose optimization
+            if not osp.exists(cache_path):
+                raise FileNotFoundError(
+                    f"use_cache=True but cached result not found: {cache_path}. "
+                    f"Run a pass with use_cache=False first to populate the cache."
+                )
+            with open(cache_path, 'rb') as f:
+                cached = pickle.load(f)
+            handV, handJ = cached['hand_verts'], cached['hand_joints']
+            # No diffusion/optimization performed on this step
+            self.diffusion_times.append(0.0)
+            self.optimization_times.append(0.0)
+            self._test_step_metrics(batch_idx, obj_name, handV, handJ, handobject)
+            return
+
         # lg_contact = handobject.ml_contact
         # obj_msdf = handobject.obj_msdf[:, :, :self.msdf_k**3].view(-1, self.msdf_k, self.msdf_k, self.msdf_k)
         # obj_msdf_center = handobject.obj_msdf[:, :, self.msdf_k**3:] # B x 3
@@ -398,32 +422,8 @@ class GraspDiffTrainer(LGCDiffTrainer):
 
         handV, handJ = handV.detach().cpu().numpy(), handJ.detach().cpu().numpy()
 
-        param_list = [{'dataset_name': 'grab', 'frame_name': f"{obj_name}_{i}", 'hand_model': trimesh.Trimesh(handV[i], self.closed_mano_faces),
-                       'obj_name': obj_name, 'hand_joints': handJ[i], 'obj_model': handobject.obj_models[0], 'obj_hulls': handobject.obj_hulls[0],
-                       'idx': i} for i in range(handV.shape[0])]
-            
-        result = calculate_metrics(param_list, metrics=self.cfg.test.criteria, pool=self.pool, reduction='none')
+        result = self._test_step_metrics(batch_idx, obj_name, handV, handJ, handobject)
 
-        # Print average of all metrics
-        avg_metrics = {k: v.mean() for k, v in result.items()}
-        print(f"Average metrics: {avg_metrics}")
-
-        self.all_results.append(result)
-        self.sample_joints.append(handJ)
-
-        # Log raw per-sample metrics to wandb
-        if not self.debug:
-            # Option 1: Log each sample as individual rows (creates distributions in wandb)
-            for i in range(len(next(iter(result.values())))):
-                sample_metrics = {f"sample/{metric_name}": float(metric_values[i])
-                                 for metric_name, metric_values in result.items()}
-                wandb.log(sample_metrics, commit=False)
-
-            # Option 2 (alternative): Use wandb Table for structured logging
-            # table_data = [[obj_names[i]] + [float(result[m][i]) for m in result.keys()]
-            #               for i in range(batch_size)]
-            # table = wandb.Table(data=table_data, columns=["object"] + list(result.keys()))
-            # wandb.log({f"test_metrics_batch_{batch_idx}": table})
         ## Visualization
         # for vis_idx in range(handV.shape[0]):
         # gt_geoms = handobject.get_vis_geoms(idx=vis_idx, obj_templates=obj_meshes)
@@ -528,9 +528,57 @@ class GraspDiffTrainer(LGCDiffTrainer):
 
         return result
 
+    def _test_step_metrics(self, batch_idx, obj_name, handV, handJ, handobject):
+        """Compute grasp quality metrics for a batch of predicted hands and record them.
+
+        Shared by the normal (diffusion + optimization) path and the use_cache path.
+        handV/handJ are numpy arrays of shape (n_samples, ...).
+        Returns the per-sample metric dict.
+        """
+        param_list = [{'dataset_name': 'grab', 'frame_name': f"{obj_name}_{i}", 'hand_model': trimesh.Trimesh(handV[i], self.closed_mano_faces),
+                       'obj_name': obj_name, 'hand_joints': handJ[i], 'obj_model': handobject.obj_models[0], 'obj_hulls': handobject.obj_hulls[0],
+                       'idx': i} for i in range(handV.shape[0])]
+
+        result = calculate_metrics(param_list, metrics=self.cfg.test.criteria, pool=self.pool, reduction='none')
+
+        self.cache_results[obj_name] = {
+            "hand_verts": handV,
+            "hand_joints": handJ,
+        }
+
+        raw_depths = result.pop("Penetration Depth Raw", [])
+        vert_ids = result.pop("Penetration Depth Vert IDs", [])
+        if obj_name not in self.raw_depth_data:
+            self.raw_depth_data[obj_name] = {'raw_depth': [], 'penetr_vert_ids': []}
+        self.raw_depth_data[obj_name]['raw_depth'].append(raw_depths)
+        self.raw_depth_data[obj_name]['penetr_vert_ids'].append(vert_ids)
+        for metric_name, metric_vals in result.items():
+            self.raw_depth_data[obj_name].setdefault(metric_name, [])
+            self.raw_depth_data[obj_name][metric_name].extend(metric_vals.tolist())
+
+        # Print average of all metrics
+        avg_metrics = {k: v.mean() for k, v in result.items()}
+        print(f"Average metrics: {avg_metrics}")
+
+        self.all_results.append(result)
+        self.sample_joints.append(handJ)
+
+        # Log per-sample scalar metrics to wandb (skip multi-dim arrays like Part Intersection Volumes)
+        if not self.debug:
+            scalar_result = {k: v for k, v in result.items()
+                             if isinstance(v, np.ndarray) and v.ndim == 1}
+            if scalar_result:
+                n_samples = len(next(iter(scalar_result.values())))
+                for i in range(n_samples):
+                    sample_metrics = {f"sample/{k}": float(v[i]) for k, v in scalar_result.items()}
+                    wandb.log(sample_metrics, commit=False)
+        return result
+
     def on_test_epoch_start(self):
         self.all_results = []
         self.sample_joints = []
+        self.cache_results = {}
+        self.raw_depth_data = {}  # {obj_name: [raw_depths_sample1, raw_depths_sample2, ...]}
 
         ## Testing metrics
         self.runtime = 0
@@ -577,3 +625,21 @@ class GraspDiffTrainer(LGCDiffTrainer):
         if not self.debug:
             wandb.log(final_metrics, commit=False)
             wandb.log({'test/results': self.test_images_table})
+
+        for k, v in self.cache_results.items():
+            with open(osp.join('tmp', 'grab', f'VolCoDiff_{k}.pkl'), 'wb') as f:
+                pickle.dump(v, f)
+
+        os.makedirs(osp.join('tmp', 'pene_analysis'), exist_ok=True)
+        dataset_name = 'grab'
+        # Finalise: convert per-metric lists to numpy arrays
+        list_keys = {'raw_depth', 'penetr_vert_ids'}  # variable-length per-sample arrays, kept as lists
+        pene_data = {}
+        for obj_name, obj_data in self.raw_depth_data.items():
+            pene_data[obj_name] = {}
+            for k, v in obj_data.items():
+                pene_data[obj_name][k] = v if k in list_keys else np.array(v)
+        pene_save_path = osp.join('tmp', 'pene_analysis', f'{dataset_name}.pkl')
+        with open(pene_save_path, 'wb') as f:
+            pickle.dump(pene_data, f)
+        print(f"[pene_analysis] Saved raw penetration depths to {pene_save_path}")

@@ -20,6 +20,7 @@ from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
 from scipy.spatial.transform import Rotation
 
 from common.manopth.manopth.manolayer import ManoLayer
+from common.utils.geometry import make_watertight
 from .hoi_dataset import BaseHOIDataset
 from .local_grid_dataset import LocalGridDataset
 
@@ -129,6 +130,15 @@ class GRABDataset(BaseHOIDataset):
         obj_info = np.load(osp.join(data_dir, 'obj_info.npy'), allow_pickle=True).item()
         for k, v in obj_info.items():
             mesh = trimesh.Trimesh(v['verts'], v['faces'], process=False)
+
+            if k == 'camera':
+                # Shipped with 10 one-triangle holes, which makes the exact
+                # boolean intersection metric fall back to voxelization.
+                # The fix only appends the missing faces, so vertex order --
+                # and therefore verts_sample_id below -- is preserved.
+                mesh = make_watertight(mesh)
+                v['verts'], v['faces'] = mesh.vertices, mesh.faces
+
             # sample_pts, fid = sample.sample_surface(mesh, self.n_obj_samples)
             v['samples'] = v.pop('verts_sample')
             v['sample_normals'] = mesh.vertex_normals[v['verts_sample_id']]

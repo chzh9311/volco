@@ -259,7 +259,11 @@ class BaseHOIDataset(Dataset):
             sample['objMsdfGrad'] = self.obj_info[obj_name]['msdf_grad'].copy()
             sample['adjPointIndices'] = self.obj_info[obj_name].get('adj_indices', None)
             sample['adjPointDistances'] = self.obj_info[obj_name].get('adj_distances', None)
-            sample['nAdjPoints'] = self.obj_info[obj_name]['n_adj_points']
+            n_adj_points = self.obj_info[obj_name]['n_adj_points']
+            n_pts = obj_msdf.shape[0] * (self.msdf_kernel_size ** 3)
+            if len(n_adj_points) == 0:
+                n_adj_points = np.zeros(n_pts, dtype=np.int64)
+            sample['nAdjPoints'] = n_adj_points
             if self.augment:
                 obj_msdf_pts = obj_msdf[:, -3:] @ Rot.T
                 obj_msdf[:, -3:] = obj_msdf_pts
@@ -268,14 +272,16 @@ class BaseHOIDataset(Dataset):
                 sample['objMsdfGrad'] = sample['objMsdfGrad'][:, reorder_id] @ Rot.T
                 ## reorder adjacents
                 adj_indices = sample['adjPointIndices']
-                grid_id = adj_indices // (self.msdf_kernel_size ** 3)
-                local_point_id = adj_indices % (self.msdf_kernel_size ** 3)
-                new_local_point_id = reorder_id[local_point_id]
-                new_adj_indices = grid_id * (self.msdf_kernel_size ** 3) + new_local_point_id
+                if len(adj_indices) > 0:
+                    grid_id = adj_indices // (self.msdf_kernel_size ** 3)
+                    local_point_id = adj_indices % (self.msdf_kernel_size ** 3)
+                    new_local_point_id = reorder_id[local_point_id]
+                    new_adj_indices = grid_id * (self.msdf_kernel_size ** 3) + new_local_point_id
+                    sample['adjPointIndices'] = new_adj_indices
                 plain_grid_ids = np.arange(obj_msdf.shape[0])
                 glob_reorder = (plain_grid_ids[:, None] * self.msdf_kernel_size**3 + reorder_id[None, :]).flatten()
-                sample['adjPointIndices'] = new_adj_indices
                 sample['nAdjPoints'] = sample['nAdjPoints'][glob_reorder]
+
 
         return sample
 

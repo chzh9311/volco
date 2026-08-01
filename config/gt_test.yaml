@@ -1,11 +1,11 @@
 defaults:
-  - msdf: experiment
+  - msdf: dense
   - data: grab_multi_contact
   - ae: gridae_128latent_v2
   - pose_optimizer: lg_base
   - _self_
 
-contact_unit: "point"
+contact_unit: "volume"
 correspondence_type: "cse"
 
 data:

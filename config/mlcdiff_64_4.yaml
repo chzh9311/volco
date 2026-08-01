@@ -1,10 +1,10 @@
 defaults:
-  - msdf: sparse
+  # - msdf: sparse
   # - msdf: "128_4"
-  # - msdf: "64_4"
+  - msdf: "64_4"
   - data: grab_multi_contact
-  - ae: gridae_128latent_v2
-  # - ae: gridae_64latent_v2
+  # - ae: gridae_128latent_v2
+  - ae: gridae_64latent_v2
   - hand_ae: handvae_16latent
   - generator: dual_ldm
   - pose_optimizer: hybrid
@@ -49,14 +49,14 @@ test:
   vis_result: true  # set to false to skip rendering and remove image columns from wandb table
   use_cache: false  # if true, reuse cached hand results (tmp/grab/result_{obj}.pkl) instead of rerunning diffusion + pose optimization
   base_criteria:
-    # - "Simulation Displacement"
-    # - "Penetration Depth"
+    - "Simulation Displacement"
+    - "Penetration Depth"
     - "Intersection Volume"
     # - "Boolean Intersection Volume"
     - "Contact Area"
-    # - "Contact Ratio"
-    # - "Cluster Size"
-    # - "Entropy"
+    - "Contact Ratio"
+    - "Cluster Size"
+    - "Entropy"
     - "IV/CA"  # per-sample Intersection Volume / Contact Area, then averaged (needs both above active)
   criteria: ${test.base_criteria}
 
@@ -82,11 +82,14 @@ physics:
 
 run_phase: train
 test_gt: false
-ckpt_path: ${generator.checkpoint_path}
+ckpt_path: logs/checkpoints/mlcdiff/latent64_64_4/best.ckpt
 optimizer: adamw
 
 debug: true
 vis_backend: open3d  # open3d (hardware) or matplotlib (software)
+pose_optimizer:
+  w_repulsive: 0.4
+  contact_th: 0.05
 
 hydra:
   job:

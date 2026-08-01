@@ -1,6 +1,7 @@
 import os
 from itertools import product
 import numpy as np
+import networkx as nx
 import torch
 import pytorch3d.ops
 import trimesh
@@ -995,3 +996,62 @@ def get_perpend_vecs_tensor(vs: torch.Tensor, device='cpu') -> tuple:
     n1[..., 2] = vs[..., 1]
     n2 = torch.cross(vs, n1, dim=-1)
     return n1, n2
+
+def make_watertight(mesh, max_loop=64):
+    """
+    Close small holes so a mesh can be used with exact boolean operations.
+
+    Drops degenerate faces, then triangulates each boundary loop (single
+    triangle when the loop has 3 edges, otherwise a fan from the loop
+    centroid). Intended for meshes that are already nearly closed -- GRAB's
+    'camera' has 10 one-triangle holes and is repaired exactly by this.
+
+    Loops longer than max_loop are left alone rather than filled badly: a
+    large opening (e.g. the mouth of an open bowl) has no correct triangular
+    cap, and filling it would silently change the object's volume. Check
+    is_watertight on the result instead of assuming success.
+
+    Existing vertices keep their index, so precomputed vertex ids stay valid.
+
+    :param max_loop: skip boundary loops with more vertices than this
+    :return: repaired copy; the input is not modified
+    """
+    mesh = mesh.copy()
+    mesh.update_faces(mesh.nondegenerate_faces())
+    mesh.remove_unreferenced_vertices()
+
+    for _ in range(6):
+        edges, counts = np.unique(mesh.edges_sorted, axis=0, return_counts=True)
+        boundary = edges[counts == 1]
+        if len(boundary) == 0:
+            break
+
+        graph = nx.from_edgelist([tuple(e) for e in boundary])
+        new_faces = []
+        for comp in nx.connected_components(graph):
+            cycles = nx.cycle_basis(graph.subgraph(comp))
+            loop = cycles[0] if cycles else list(comp)
+            if len(loop) < 3 or len(loop) > max_loop:
+                continue
+            if len(loop) == 3:
+                new_faces.append(loop)
+                continue
+            # fan from the centroid, walking the loop in its best-fit plane
+            pts = mesh.vertices[loop]
+            centroid = pts.mean(axis=0)
+            _, _, vt = np.linalg.svd(pts - centroid)
+            angle = np.arctan2((pts - centroid) @ vt[1], (pts - centroid) @ vt[0])
+            ordered = [loop[i] for i in np.argsort(angle)]
+            ci = len(mesh.vertices)
+            mesh.vertices = np.vstack([mesh.vertices, centroid])
+            for i in range(len(ordered)):
+                new_faces.append([ordered[i], ordered[(i + 1) % len(ordered)], ci])
+
+        if not new_faces:
+            break
+        mesh.faces = np.vstack([mesh.faces, np.array(new_faces, dtype=np.int64)])
+        mesh.merge_vertices()
+
+    trimesh.repair.fix_normals(mesh)
+    trimesh.repair.fix_winding(mesh)
+    return mesh

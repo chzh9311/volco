@@ -3,6 +3,7 @@ from contextlib import nullcontext
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import pickle
 import lightning as L
 import open3d as o3d
 import trimesh
@@ -458,6 +459,7 @@ class LGCDiffTrainer(L.LightningModule):
     
     def on_test_epoch_start(self):
         self.all_results = []
+        self.cache_results = {}
         self.sample_joints = []
 
         ## Testing metrics
@@ -628,7 +630,11 @@ class LGCDiffTrainer(L.LightningModule):
             
         result = calculate_metrics(param_list, metrics=self.cfg.test.criteria, pool=self.pool, reduction='none')
 
-        self.all_results.append(result)
+        self.cache_results[obj_name] = {
+            "hand_verts": handV,
+            "hand_joints": handJ,
+        }
+        print('saved to cache_results')
         self.sample_joints.append(handJ)
 
         # Log raw per-sample metrics to wandb
@@ -663,7 +669,8 @@ class LGCDiffTrainer(L.LightningModule):
         backend = self.cfg.get('vis_backend', 'open3d')
         recon_imgs = []
         pred_imgs = []
-        for vis_idx in range(n_samples):
+        # for vis_idx in range(n_samples):
+        if False:
             recon_img, pred_geoms = visualize_recon_hand_w_object(
                 hand_verts=pred_hand_verts[vis_idx].detach().cpu().numpy(),
                 hand_verts_mask=pred_verts_mask[vis_idx].detach().cpu().numpy(),
@@ -878,6 +885,11 @@ class LGCDiffTrainer(L.LightningModule):
         if not self.debug:
             wandb.log(final_metrics, commit=False)
             wandb.log({"test/images": self.test_images_table})
+
+        ## Save the results to study detailed criteria.
+        for k, v in self.cache_results.items():
+            with open(osp.join('tmp', 'grab', f'result_{k}.pkl'), 'wb') as f:
+                pickle.dump(v, f)
 
         # return final_metrics
     

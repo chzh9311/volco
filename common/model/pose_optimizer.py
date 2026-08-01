@@ -277,6 +277,8 @@ def optimize_pose_wrt_local_grids(mano_layer, grid_centers, target_pts, target_W
     if init_pose is not None:
         # init_pose format: [trans(3), full_pose(48), betas(10)] = 61 dims
         # full_pose = [global_pose(3), finger_pose(45)]
+        # noise_scale = 0.5
+        # init_pose = init_pose + torch.cat([torch.randn_like(init_pose[:, :3]) * 0.1, torch.randn_like(init_pose[:, 3:])], dim=1) * noise_scale
         mano_trans = init_pose[:, :3].clone()
         full_pose = init_pose[:, 3:51].clone()
         global_pose = full_pose[:, :3]

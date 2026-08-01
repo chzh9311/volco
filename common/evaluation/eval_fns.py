@@ -21,9 +21,21 @@ from common.utils.vis import o3dmesh_from_trimesh
 
 from .bullet_simulation import run_simulation
 from common.utils.converter import transform_to_canonical, convert_joints
+from common.utils.geometry import make_watertight
 from sklearn.neighbors import NearestNeighbors
 
 value_metrics = ["Contact Ratio", "Success Rate", "Pierce-Free Rate", "Cluster Size", "Entropy", "Canonical Entropy", "Canonical Cluster Size"]
+
+# MANO joint indices for each hand part (argmax blend-weight partition)
+PART_JOINTS = {
+    "palm":   [0],
+    "thumb":  [13, 14, 15],
+    "index":  [1, 2, 3],
+    "middle": [4, 5, 6],
+    "little": [7, 8, 9],
+    "ring":   [10, 11, 12],
+}
+
 
 def diversity_legacy(params_list, cls_num=20):
     # k-means (original scipy implementation)
@@ -103,11 +115,17 @@ def parallel_calculate_metrics(params:dict):
         if "Stable Rate @ 2cm" in metrics:
             result["Stable Rate @ 2cm"] = pb_disp < 2
     if "Intersection Volume" in metrics:
-        int_vol = intersect_vox(params['obj_model'], params['hand_model'], pitch=0.005) * 1000000 # turn to cm3
+        int_vol = intersect_vox(params['obj_model'], params['hand_model'], pitch=0.001) * 1000000 # turn to cm3
+        # int_vol = intersect_vol_boolean(params['obj_model'], params['hand_model'], engine='manifold', fallback_pitch=0.005) * 1000000 # turn to cm3
         result["Intersection Volume"] = int_vol
+    if "Boolean Intersection Volume" in metrics:
+        int_vol = intersect_vol_boolean(params['obj_model'], params['hand_model'], engine='manifold', fallback_pitch=0.001) * 1000000 # turn to cm3
+        result["Boolean Intersection Volume"] = int_vol
     if "Penetration Depth" in metrics:
-        pen_depth = pene_depth(obj_mesh=params['obj_model'], hand_verts=params['hand_model'].vertices) * 100 # to cm
-        result["Penetration Depth"] = pen_depth
+        pen_depth, result_distance, penetr_vert_ids = pene_depth(obj_mesh=params['obj_model'], hand_verts=params['hand_model'].vertices) # to cm
+        result["Penetration Depth"] = pen_depth * 100
+        result["Penetration Depth Raw"] = result_distance * 100
+        result["Penetration Depth Vert IDs"] = penetr_vert_ids
 
     if "Contact Area" in metrics:
         hand_mesh = trimesh.Trimesh(vertices=params['hand_model'].vertices, faces=params['hand_model'].faces)
@@ -185,17 +203,79 @@ def determine_pierce(obj_mesh: trimesh.Trimesh, hand_mesh: trimesh.Trimesh):
     return no_pierce, len(components) - 1
 
 
-def intersect_vox(obj_mesh, hand_mesh, pitch=0.5):
+def _obj_voxel_points(obj_mesh, hand_mesh, pitch):
+    """Grid points that lie inside the object, over the hand-object overlap box.
+
+    Localizes the intersection of the hand and object bounding boxes, builds a
+    regular grid at `pitch` resolution inside it, and keeps points whose signed
+    distance to the object is > -pitch (pysdf: positive inside, negative outside).
+    Returns an (N, 3) array of interior grid points (possibly empty).
+    """
+    obj_lo, obj_hi = obj_mesh.bounds
+    hand_lo, hand_hi = hand_mesh.bounds
+    lo = np.maximum(obj_lo, hand_lo)
+    hi = np.minimum(obj_hi, hand_hi)
+    if np.any(hi <= lo):
+        return np.empty((0, 3), dtype=np.float64)  # bounding boxes do not overlap
+
+    # Grid the overlap box at `pitch` resolution (cell centers).
+    axes = [np.arange(lo[d] + pitch / 2.0, hi[d], pitch) for d in range(3)]
+    if any(a.size == 0 for a in axes):
+        return np.empty((0, 3), dtype=np.float64)
+    grid = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(-1, 3)
+
+    obj_sdf = SDF(obj_mesh.vertices, obj_mesh.faces)
+    inside_obj = obj_sdf(grid) > -pitch  # pysdf: positive inside, negative outside
+    return grid[inside_obj]
+
+
+def intersect_vox(obj_mesh, hand_mesh, pitch=0.001):
     """
     Evaluating intersection between hand and object
     :param pitch: voxel size
     :return: intersection volume
     """
-    obj_vox = obj_mesh.voxelized(pitch=pitch)
-    obj_points = obj_vox.points
-    inside = hand_mesh.contains(obj_points)
+    obj_points = _obj_voxel_points(obj_mesh, hand_mesh, pitch)
+    if len(obj_points) == 0:
+        return 0.0
+    # pysdf sign test for hand containment (positive == inside); ~1000x faster
+    # than trimesh's ray-based `contains` without a compiled ray backend.
+    hand_sdf = SDF(hand_mesh.vertices, hand_mesh.faces)
+    inside = hand_sdf(obj_points) > 0
     volume = inside.sum() * np.power(pitch, 3)
     return volume
+
+
+def intersect_vol_boolean(obj_mesh, hand_mesh, engine='manifold', fallback_pitch=0.005):
+    """
+    Exact intersection volume between hand and object via mesh boolean.
+
+    Unlike intersect_vox, which voxelizes only the object surface shell, this
+    computes the true solid intersection. Numbers are therefore NOT comparable
+    to the voxel metric reported by GrabNet/GraspTTA-lineage work.
+
+    Requires both meshes to be watertight; falls back to solid voxelization
+    when they are not, or when the boolean engine fails.
+
+    :param engine: trimesh boolean backend (manifold3d is bundled with trimesh>=4)
+    :param fallback_pitch: voxel size used by the fallback path
+    :return: intersection volume, in the cube of the mesh units
+    """
+    if obj_mesh.is_watertight and hand_mesh.is_watertight:
+        try:
+            inter = trimesh.boolean.intersection([obj_mesh, hand_mesh], engine=engine)
+            if inter is None or inter.is_empty:
+                return 0.0
+            # volume is signed and flips with winding order
+            return abs(float(inter.volume))
+        except Exception as e:
+            print(f"Boolean intersection failed ({e}), falling back to solid voxelization.")
+    else:
+        print("Non-watertight input, falling back to solid voxelization.")
+
+    obj_vox = obj_mesh.voxelized(pitch=fallback_pitch).fill()
+    inside = hand_mesh.contains(obj_vox.points)
+    return float(inside.sum() * np.power(fallback_pitch, 3))
 
 
 def calc_diversity(hand_joints):
@@ -236,11 +316,14 @@ def pene_depth(obj_mesh, hand_verts):
 
     if penetr_mask.sum() == 0:
         max_depth = 0
+        result_distance = np.array([])
+        penetr_vert_ids = np.array([], dtype=np.int64)
     else:
-        (result_close, result_distance, _, ) = trimesh.proximity.closest_point(obj_mesh, hand_verts[penetr_mask == 1])
+        penetr_vert_ids = np.where(penetr_mask)[0]
+        (result_close, result_distance, _) = trimesh.proximity.closest_point(obj_mesh, hand_verts[penetr_vert_ids])
         max_depth = result_distance.max()
 
-    return max_depth
+    return max_depth, result_distance, penetr_vert_ids
 
 def calculate_metrics(param_list, pool=None, metrics=[], reduction='mean'):
     for p in param_list:
@@ -274,15 +357,26 @@ def calculate_metrics(param_list, pool=None, metrics=[], reduction='mean'):
 
     for k in result_list[0].keys():
         result[k] = [rit[k] for rit in result_list]
+
+    # Per-sample ratio of Intersection Volume to Contact Area, then averaged by
+    # the reduction below (so it is a mean of per-sample ratios, not a ratio of
+    # means). Only defined when both base metrics were computed.
+    if "Intersection Volume" in result and "Contact Area" in result:
+        result["IV/CA"] = [
+            iv / ca if ca > 0 else 0.0
+            for iv, ca in zip(result["Intersection Volume"], result["Contact Area"])
+        ]
+
     for m in result.keys():
-        if reduction == 'mean':
-            result[m] = np.mean(np.asarray(result[m])).item()
-        elif reduction == 'sum':
-            result[m] = np.sum(np.asarray(result[m])).item()
-        elif reduction == "none":
-            result[m] = np.asarray(result[m])
-        else:
-            raise ValueError(f"Unknown reduction {reduction}")
+        if m not in ("Penetration Depth Raw", "Penetration Depth Vert IDs"):  # Keep variable-length per-vertex arrays as lists
+            if reduction == 'mean':
+                result[m] = np.mean(np.asarray(result[m])).item()
+            elif reduction == 'sum':
+                result[m] = np.sum(np.asarray(result[m])).item()
+            elif reduction == "none":
+                result[m] = np.asarray(result[m])
+            else:
+                raise ValueError(f"Unknown reduction {reduction}")
     return result
 
 
