@@ -1,6 +1,6 @@
 """
-Measure GFLOPs, parameter count, and peak GPU memory for the full
-dual-latent diffusion inference pipeline:
+Measure GFLOPs, parameter count, peak GPU memory, and wall-clock runtime for
+the full dual-latent diffusion inference pipeline:
 
     HandVAE (encode/decode)  +  DualUNetModel (1 denoising step × T)  +  GRIDAE (decode)
 
@@ -8,10 +8,13 @@ Usage:
     conda activate hoi_common
     python scripts/diffusion_complexity.py
 """
+import time
+
 import torch
 torch.multiprocessing.set_sharing_strategy('file_system')
 
 import hydra
+import numpy as np
 from omegaconf import OmegaConf
 from torchinfo import summary
 
@@ -112,6 +115,29 @@ def _params(model):
     return total, trainable
 
 
+def _timeit(fn, device, n_warmup=2, n_repeat=5):
+    """
+    Wall-clock time of `fn` in seconds: (mean, std).
+
+    GPU work is async, so every run is bracketed by a synchronize. Warm-up runs
+    are discarded to exclude one-off costs (cuDNN autotune, lazy kernel load,
+    allocator growth) that would otherwise be charged to the first timed run.
+    """
+    for _ in range(n_warmup):
+        fn()
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+    times = []
+    for _ in range(n_repeat):
+        t0 = time.perf_counter()
+        fn()
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        times.append(time.perf_counter() - t0)
+    return float(np.mean(times)), float(np.std(times))
+
+
 def _summary(wrapper, input_data, device, label, depth=4):
     print(f"\n{'='*60}")
     print(f"  torchinfo — {label}")
@@ -127,7 +153,7 @@ def _summary(wrapper, input_data, device, label, depth=4):
     return s.total_mult_adds
 
 
-@hydra.main(config_path="../config", config_name="mlcdiff", version_base=None)
+@hydra.main(config_path="../config", config_name="mlcdiff_128_16", version_base=None)
 def main(cfg):
     from common.model.gridae import gridae as gridae_module
     from common.model.diff.unet import DualUNetModel
@@ -273,7 +299,48 @@ def main(cfg):
             _ = gridae.decode(z_grid, obj_cond)
         peak_mb_decode = torch.cuda.max_memory_allocated(device) / 1024 ** 2
 
-    # ── 9. Summary ────────────────────────────────────────────────────────────
+    # ── 9. Wall-clock runtime ─────────────────────────────────────────────────
+    # Same three phases as the memory section. The denoising loop is timed as a
+    # single step (repeated) and extrapolated to T, plus one measured full pass
+    # -- timing 1000 steps five times over would dominate the script's runtime.
+    cond_dict = {'obj_feat': obj_feat}
+    cat_noise = torch.randn(B, d_y + d_x * n_pts, device=device)
+
+    def _run_encode():
+        with torch.no_grad():
+            hand_ae.encode(hand_verts)
+            gridae.encode(lg_contact, obj_sdf)
+
+    def _run_unet_cond():
+        with torch.no_grad():
+            unet.obj_feat_net(obj_pc)
+
+    def _run_denoise_step():
+        with torch.no_grad():
+            unet(cat_noise, ts, cond_dict, is_train=False)
+
+    def _run_denoise_full():
+        with torch.no_grad():
+            x = cat_noise
+            for t in range(T - 1, -1, -1):
+                ts_t = torch.full((B,), t, dtype=torch.long, device=device)
+                x, _ = unet(x, ts_t, cond_dict, is_train=False)
+
+    def _run_decode():
+        with torch.no_grad():
+            hand_ae.decode(hand_latent)
+            gridae.decode(z_grid, obj_cond)
+
+    t_encode, t_encode_sd = _timeit(_run_encode, device)
+    t_cond, t_cond_sd = _timeit(_run_unet_cond, device)
+    t_step, t_step_sd = _timeit(_run_denoise_step, device)
+    t_decode, t_decode_sd = _timeit(_run_decode, device)
+    # One full reverse pass, measured once (no warm-up repeats needed -- the
+    # per-step warm-up above already primed the kernels).
+    t_denoise_full, _ = _timeit(_run_denoise_full, device, n_warmup=0, n_repeat=1)
+    t_total = t_encode + t_cond + t_denoise_full + t_decode
+
+    # ── 10. Summary ───────────────────────────────────────────────────────────
     gflops = lambda macs: 2 * macs / 1e9
 
     print(f"\n{'='*60}")
@@ -307,6 +374,19 @@ def main(cfg):
         print(f"  Decoding phase  : {peak_mb_decode:.1f} MB")
     else:
         print("  Peak GPU mem   : N/A (no CUDA)")
+    print()
+    print(f"  ── Wall-clock runtime ({device.type}) ──────────────────────────")
+    print(f"  HandVAE+GRIDAE encode    : {t_encode*1e3:8.2f} ms  (± {t_encode_sd*1e3:.2f})")
+    print(f"  DualUNet obj conditioning : {t_cond*1e3:8.2f} ms  (± {t_cond_sd*1e3:.2f})")
+    print(f"  DualUNet 1 denoise step  : {t_step*1e3:8.2f} ms  (± {t_step_sd*1e3:.2f})")
+    print(f"  DualUNet {T} steps total  : {t_denoise_full:8.2f} s   "
+          f"(1 step × {T} = {t_step*T:.2f} s)")
+    print(f"  HandVAE+GRIDAE decode    : {t_decode*1e3:8.2f} ms  (± {t_decode_sd*1e3:.2f})")
+    print(f"  ───────────────────────────────────────────────────────")
+    print(f"  Total inference time     : {t_total:8.2f} s")
+    if t_total > 0:
+        print(f"  Denoising share of total : {t_denoise_full/t_total*100:8.1f} %")
+        print(f"  Effective throughput     : {total_inf_gflops/t_total:8.1f} GFLOP/s")
     print(f"{'='*60}\n")
 
 

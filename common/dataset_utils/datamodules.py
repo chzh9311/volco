@@ -321,7 +321,7 @@ class HOIDatasetModule(LightningDataModule):
                     print('result saved to ', msdf_path)
                 if not osp.exists(osp.dirname(adj_points_path)):
                     os.makedirs(osp.dirname(adj_points_path))
-                if not osp.exists(adj_points_path):
+                if not osp.exists(adj_points_path) and self.cfg.msdf.kernel_size <= 8:
                     print(f'Preprocessing adjacent point pairs for {k}...')
                     msdf_data = np.load(msdf_path)
                     msdf_points = msdf_data['msdf'][:, -3:]  # N x 3

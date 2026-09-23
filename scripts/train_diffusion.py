@@ -113,13 +113,16 @@ def main(cfg):
         else:
             set_seed(42)  # default seed
 
-        sd = torch.load(cfg.ckpt_path, map_location='cpu', weights_only=False)['state_dict']
-        print('total keys in ckpt:', len(sd.keys()))
-        load_pl_ckpt(gridae, sd, prefix='grid_ae.')
-        load_pl_ckpt(model, sd, prefix='model.')
-        load_pl_ckpt(hand_ae, sd, prefix='hand_ae.')
-        unused_keys = [k for k in sd.keys() if not (k.startswith('grid_ae.') or k.startswith('model.') or k.startswith('hand_ae.'))]
-        print(f'Unused keys in ckpt: {unused_keys}')
+        if cfg.ckpt_path == "Random":
+            print("Using random weights for model, grid_ae, and hand_ae.")
+        else:
+            sd = torch.load(cfg.ckpt_path, map_location='cpu', weights_only=False)['state_dict']
+            print('total keys in ckpt:', len(sd.keys()))
+            load_pl_ckpt(gridae, sd, prefix='grid_ae.')
+            load_pl_ckpt(model, sd, prefix='model.')
+            load_pl_ckpt(hand_ae, sd, prefix='hand_ae.')
+            unused_keys = [k for k in sd.keys() if not (k.startswith('grid_ae.') or k.startswith('model.') or k.startswith('hand_ae.'))]
+            print(f'Unused keys in ckpt: {unused_keys}')
 
         pl_model = trainer_module(grid_ae=gridae, model=model, diffusion=diffusion, hand_ae=hand_ae, cfg=cfg)
         # pl_model = LGCDiffTrainer.load_from_checkpoint(cfg.ckpt_path, grid_ae=gridae, model=model, cfg=cfg)

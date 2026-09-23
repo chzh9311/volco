@@ -3,8 +3,9 @@ defaults:
   - msdf: "dense"
   # - msdf: "64_4"
   - data: grab_multi_contact
-  - ae: gridae_128latent_v2
+  # - ae: gridae_128latent_v2
   # - ae: gridae_64latent_v2
+  - ae: gridae_256latent_v2
   - hand_ae: handvae_16latent
   - generator: dual_ldm
   - pose_optimizer: hybrid
@@ -19,7 +20,7 @@ train:
   batch_size: 64
   vis_every_n_batches: 5000
   log_every_n_batches: 100
-  augment: true
+  augment: false
   loss_weights:
     latent_mse: 1.0
     difference_loss: 0.1
@@ -82,7 +83,7 @@ physics:
 
 run_phase: train
 test_gt: false
-ckpt_path: logs/checkpoints/mlcdiff/latent64_128_4/best.ckpt
+ckpt_path: "Random"
 optimizer: adamw
 
 debug: true

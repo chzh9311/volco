@@ -259,7 +259,7 @@ class BaseHOIDataset(Dataset):
             sample['objMsdfGrad'] = self.obj_info[obj_name]['msdf_grad'].copy()
             sample['adjPointIndices'] = self.obj_info[obj_name].get('adj_indices', None)
             sample['adjPointDistances'] = self.obj_info[obj_name].get('adj_distances', None)
-            n_adj_points = self.obj_info[obj_name]['n_adj_points']
+            n_adj_points = self.obj_info[obj_name].get('n_adj_points', [])
             n_pts = obj_msdf.shape[0] * (self.msdf_kernel_size ** 3)
             if len(n_adj_points) == 0:
                 n_adj_points = np.zeros(n_pts, dtype=np.int64)

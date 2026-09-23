@@ -1,5 +1,5 @@
 defaults:
-  - msdf: "128_4"
+  - msdf: "64_4"
   - data: grab_local_grid
   - ae: gridae_64latent_v2
   - _self_

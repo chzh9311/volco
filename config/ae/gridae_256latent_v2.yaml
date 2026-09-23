@@ -2,6 +2,7 @@ name: GRIDAEResidualv2
 in_dim: ${add:1,${data.hand_cse_dim}}
 kernel_size: ${msdf.kernel_size}
 h_dims: 
+  - 32
   - 64
   - 128
   - 256
@@ -9,11 +10,12 @@ feat_dim: 256
 res_expansion: 1
 n_res_layers: 2
 
-obj_feat_dim: 64
+obj_feat_dim: 128
 obj_h_dims:
   - 16
   - 32
   - 64
+  - 128
 obj_res_expansion: 2
 obj_n_res_layers: 2
 out_dim: ${add:1,${data.hand_cse_dim}}

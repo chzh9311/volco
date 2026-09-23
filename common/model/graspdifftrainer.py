@@ -276,6 +276,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
             handV, handJ = cached['hand_verts'], cached['hand_joints']
             # No diffusion/optimization performed on this step
             self.diffusion_times.append(0.0)
+            self.vae_times.append(0.0)
             self.optimization_times.append(0.0)
             self._test_step_metrics(batch_idx, obj_name, handV, handJ, handobject)
             return
@@ -325,6 +326,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
                 all_geoms.extend([h, o])
             o3d.visualization.draw_geometries(all_geoms, window_name='Projection Progress (every 100 steps)')
 
+        _vae_t0 = time.perf_counter()
         grid_latent = grid_latent.reshape(n_samples*n_grids, -1)
         ## repeat the multi-scale obj cond here
         multi_scale_obj_cond = [cond.repeat(n_samples, 1, 1, 1, 1) for cond in multi_scale_obj_cond]
@@ -339,6 +341,9 @@ class GraspDiffTrainer(LGCDiffTrainer):
         grid_coords = obj_msdf_center[:, :, None, :] + self.grid_coords.view(-1, 3)[None, None, :, :]  # B x N x K^3 x 3
         pred_grid_cse = recon_lg_contact[..., 1:].reshape(n_samples, -1, self.cse_dim)
         pred_targetWverts = self.hand_cse.emb2Wvert(pred_grid_cse.view(n_samples, -1, self.cse_dim))
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize()
+        self.vae_times.append(time.perf_counter() - _vae_t0)
 
         _opt_t0 = time.perf_counter()
         if self.cfg.pose_optimizer.name == 'hand_ae':
@@ -583,6 +588,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
         ## Testing metrics
         self.runtime = 0
         self.diffusion_times = []
+        self.vae_times = []
         self.optimization_times = []
         if hasattr(self.logger, 'experiment') and hasattr(self.logger.experiment, 'log') and not self.debug:
             import wandb
@@ -606,14 +612,16 @@ class GraspDiffTrainer(LGCDiffTrainer):
                 final_metrics[f"{m}/max"]  = np.max(all_metrics).item()
 
         # Timing
-        avg_diff = float(np.mean(self.diffusion_times)) if self.diffusion_times else 0.0
+        avg_unet = float(np.mean(self.diffusion_times))    if self.diffusion_times    else 0.0
+        avg_vae  = float(np.mean(self.vae_times))          if self.vae_times          else 0.0
         avg_opt  = float(np.mean(self.optimization_times)) if self.optimization_times else 0.0
         final_metrics.update({
-            'Inference Time/Diffusion (s)':    avg_diff,
+            'Inference Time/UNet (s)':         avg_unet,
+            'Inference Time/VAE (s)':          avg_vae,
             'Inference Time/Optimization (s)': avg_opt,
-            'Inference Time/Total (s)':         avg_diff + avg_opt,
+            'Inference Time/Total (s)':        avg_unet + avg_vae + avg_opt,
         })
-        print(f"[Timing] Diffusion: {avg_diff:.3f}s | Optimization: {avg_opt:.3f}s | Total: {avg_diff + avg_opt:.3f}s")
+        print(f"[Timing] UNet: {avg_unet:.3f}s | VAE: {avg_vae:.3f}s | Optimization: {avg_opt:.3f}s | Total: {avg_unet + avg_vae + avg_opt:.3f}s")
 
         from common.evaluation.eval_fns import calc_diversity
         sample_joints = np.concatenate(self.sample_joints, axis=0)

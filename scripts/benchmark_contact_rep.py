@@ -60,7 +60,7 @@ def test_contact(cfg):
     obj_meshes_by_name = {n: trimesh.Trimesh(obj_info[n]['verts'], obj_info[n]['faces']) for n in dataset.obj_info.keys()}
     simp_obj_meshes_by_name = {n: trimesh.Trimesh(simp_obj_mesh[n]['verts'], simp_obj_mesh[n]['faces']) for n in dataset.obj_info.keys()}
 
-    batch_size = 16
+    batch_size = 1
     train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=8, collate_fn=HOIDatasetModule.collate_fn)
     print(f"Test dataset size: {len(dataset)}, batch size: {batch_size}")
 
@@ -83,9 +83,8 @@ def test_contact(cfg):
         hand_model.to(device)
 
     all_handVs, all_handJs = [], []
+    all_opt_peak_mb = []   # per-batch peak GPU memory during pose optimization
     for idx, batch in enumerate(train_loader):
-        if idx > 16: 
-            break
         if idx > 10:
             break
         elapsed = time.time() - t_start
@@ -108,6 +107,9 @@ def test_contact(cfg):
             obj_normals = torch.as_tensor(np.stack(obj_normals, axis=0), dtype=torch.float32, device=device)  # (B, N*K^3, 3)
             sample = ho_gt.forward(batch['handVerts'].to(device), batch['handPartT'].to(device), obj_verts, obj_normals)
 
+            if device.type == 'cuda':
+                torch.cuda.synchronize(device)
+                torch.cuda.reset_peak_memory_stats(device)
             global_pose, mano_pose, mano_shape, mano_trans = optimize_pose_contactgen(
                 model=hand_model,
                 mano_layer=mano_layer,
@@ -116,6 +118,9 @@ def test_contact(cfg):
                 obj_partition=sample['partition_object'],
                 obj_uv=sample['uv_object']
             )
+            if device.type == 'cuda':
+                torch.cuda.synchronize(device)
+                all_opt_peak_mb.append(torch.cuda.max_memory_allocated(device) / 1024 ** 2)
             gt_handV = batch['handVerts'].numpy()  # (B, V, 3)
 
         else:
@@ -166,6 +171,9 @@ def test_contact(cfg):
                 # )
                 pred_targetWverts = hand_cse.emb2Wvert(pred_grid_cse)  # (B, N*K^3, 778)
 
+                if device.type == 'cuda':
+                    torch.cuda.synchronize(device)
+                    torch.cuda.reset_peak_memory_stats(device)
                 with torch.enable_grad():
                     mano_params, _ = optimize_pose_wrt_local_grids(
                         mano_layer,
@@ -178,17 +186,26 @@ def test_contact(cfg):
                         grid_scale=msdf_scale,
                         w_repulsive=0,
                     )
+                if device.type == 'cuda':
+                    torch.cuda.synchronize(device)
+                    all_opt_peak_mb.append(torch.cuda.max_memory_allocated(device) / 1024 ** 2)
                 mano_trans, global_pose, mano_pose, mano_shape = mano_params
-            
+
             elif cfg.contact_unit == 'point':
                 pmap = ho_gt.point_cse if cfg.correspondence_type=='cse' else ho_gt.part_map
                 thin_objects = ['wineglass', 'mug', 'fryingpan']
+                if device.type == 'cuda':
+                    torch.cuda.synchronize(device)
+                    torch.cuda.reset_peak_memory_stats(device)
                 global_pose, mano_pose, mano_shape, mano_trans, init_pose = optimize_pose_contactopt(
                                     mano_layer, ho_gt.obj_verts, ho_gt.obj_normals,
                                     ho_gt.contact_map.squeeze(-1), pmap, n_iter=1000, save_history=False,
-                                    partition_type=cfg.correspondence_type, w_pen_cost=40, 
+                                    partition_type=cfg.correspondence_type, w_pen_cost=40,
                                     hand_cse=hand_cse if cfg.correspondence_type=='cse' else None,
                                     is_thin=torch.LongTensor([obj_name in thin_objects for obj_name in obj_names]).to(device))
+                if device.type == 'cuda':
+                    torch.cuda.synchronize(device)
+                    all_opt_peak_mb.append(torch.cuda.max_memory_allocated(device) / 1024 ** 2)
 
             gt_handV = ho_gt.hand_verts.detach().cpu().numpy()  # (B, V, 3)
 
@@ -221,7 +238,8 @@ def test_contact(cfg):
         avg_mpvpe = float(np.mean(mpvpe))
         avg_f5 = float(np.mean(all_f5[-cur_batch_size:]))
         avg_f15 = float(np.mean(all_f15[-cur_batch_size:]))
-        print(f"[{idx}] {obj_names}: MPVPE={avg_mpvpe:.2f}mm  F@5={avg_f5:.4f}  F@15={avg_f15:.4f}")
+        mem_str = f"  peak_mem={all_opt_peak_mb[-1]:.1f}MB" if all_opt_peak_mb else ""
+        print(f"[{idx}] {obj_names}: MPVPE={avg_mpvpe:.2f}mm  F@5={avg_f5:.4f}  F@15={avg_f15:.4f}{mem_str}")
 
     # Aggregate
     _, _, auc, _, _ = eval_util.get_measures(val_min=0.0, val_max=0.05, steps=100)
@@ -234,10 +252,18 @@ def test_contact(cfg):
         'F-score@15mm': float(np.mean(all_f15)),
         'AUC (0-50mm)': float(auc),
     }
+    if all_opt_peak_mb:
+        overall['Opt peak GPU mem (MB)'] = float(np.max(all_opt_peak_mb))
+        overall['Opt mean GPU mem (MB)'] = float(np.mean(all_opt_peak_mb))
 
     print("\n=== Overall Metrics ===")
     for k, v in overall.items():
         print(f"  {k}: {v:.4f}")
+    if all_opt_peak_mb:
+        print(f"\n=== Pose optimization peak GPU memory (batch_size={batch_size}) ===")
+        print(f"  max over batches : {np.max(all_opt_peak_mb):.1f} MB")
+        print(f"  mean over batches: {np.mean(all_opt_peak_mb):.1f} MB")
+        print(f"  min over batches : {np.min(all_opt_peak_mb):.1f} MB")
 
     npz_path = f'tmp/benchmark_contact_rep_hands_{cfg.contact_unit}_{cfg.correspondence_type}.npz'
     np.savez_compressed(

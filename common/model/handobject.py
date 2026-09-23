@@ -237,7 +237,7 @@ class HandObject:
         if self.contact_unit == 'grid':
             self.obj_msdf = batch['objMsdf'].clone().to(self.device).float()
             self.obj_msdf_grad = batch['objMsdfGrad'].clone().to(self.device).float()
-            self.adj_point_indices = [b.to(self.device) for b in batch['adjPointIndices']]
+            self.adj_point_indices = [b.to(self.device) if b is not None else None for b in batch['adjPointIndices']]
             self.n_adj_pt = batch['nAdjPoints'].clone().to(self.device)
             self.msdf_grad = self.obj_msdf_grad
 
