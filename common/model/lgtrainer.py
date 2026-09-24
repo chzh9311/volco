@@ -85,6 +85,7 @@ class LGTrainer(L.LightningModule):
             loss_dict[f'{stage}/avg_contact_values'] = contact_value.mean().detach()
             loss_dict[f'{stage}/contact_ratio'] = (contact_value > 0.03).float().mean().detach()
             loss_dict[f'{stage}/in_ratio'] = (contact_value > 0.5).float().mean().detach()
+            loss_dict.update(self.cond_usage_stats(posterior, obj_cond, stage=stage))
         
         # recon_loss = F.mse_loss(recon_grid_contact, gt_grid_contact.permute(0, 4, 1, 2, 3))
         # loss_dict = {f'{stage}/embedding_loss': loss, f'{stage}/recon_loss': recon_loss, f'{stage}/perplexity': perplexity}
@@ -451,6 +452,62 @@ class LGTrainer(L.LightningModule):
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr)
         return optimizer
     
+    @torch.no_grad()
+    def cond_usage_stats(self, posterior, obj_cond, stage='val'):
+        """
+        Measure whether the decoder actually uses the object condition, or has
+        collapsed to treating it as a constant bias.
+
+        The reconstruction loss cannot reveal this: when the latent has enough
+        capacity to encode the target on its own, the object branch can decay to
+        a constant and every loss term stays healthy. These metrics make that
+        failure visible.
+
+        Metrics (all computed at the posterior mode, so they are deterministic):
+          cond_sensitivity  relative change in the decoded grid when obj_cond is
+                            shuffled across the batch, holding z fixed. ~0 means
+                            the condition's per-sample content is ignored.
+          cond_drop_effect  relative change when obj_cond is zeroed instead. Large
+                            here while cond_sensitivity is ~0 is the signature of
+                            the condition acting as a learned bias only.
+          latent_sensitivity same shuffle test on z, as a reference scale for how
+                            much the decoder responds to anything at all.
+          obj_feat_cov      across-sample std / abs-mean of the global object
+                            feature. ~0 means the branch outputs a constant.
+        """
+        z = posterior.mode()
+        batch_size = z.shape[0]
+        keys = ['cond_sensitivity', 'cond_drop_effect', 'latent_sensitivity', 'obj_feat_cov']
+        if batch_size < 2:
+            # A shuffle is meaningless for a single sample, but the keys must stay
+            # consistent across the epoch or log_dict's epoch reduction complains
+            # (val_dataloader does not set drop_last, so a 1-sample tail batch
+            # is possible). NaN is excluded from the epoch mean by the logger.
+            return {f'{stage}/{k}': torch.full((), float('nan'), device=z.device) for k in keys}
+        out = {}
+
+        base = self.model.decode(z, obj_cond=obj_cond)
+        base_norm = base.norm() + 1e-12
+        # Derangement-free shuffle is unnecessary; a random permutation is enough
+        # in expectation, and matching indices only bias the metric downward.
+        perm = torch.randperm(batch_size, device=z.device)
+
+        shuffled = self.model.decode(z, obj_cond=[c[perm] for c in obj_cond])
+        out[f'{stage}/cond_sensitivity'] = ((base - shuffled).norm() / base_norm).detach()
+
+        zeroed = self.model.decode(z, obj_cond=[torch.zeros_like(c) for c in obj_cond])
+        out[f'{stage}/cond_drop_effect'] = ((base - zeroed).norm() / base_norm).detach()
+
+        z_shuffled = self.model.decode(z[perm], obj_cond=obj_cond)
+        out[f'{stage}/latent_sensitivity'] = ((base - z_shuffled).norm() / base_norm).detach()
+
+        # obj_cond[-1] is the global object feature vector (see GRIDAEAbstract.encode).
+        obj_feat = obj_cond[-1]
+        if obj_feat.dim() == 2:
+            out[f'{stage}/obj_feat_cov'] = (obj_feat.std(dim=0).mean()
+                                            / (obj_feat.abs().mean() + 1e-12)).detach()
+        return out
+
     def loss_net(self, x, x_hat, posterior, gt_face_idx, gt_w, proc='train'):
         """
         Compute the loss for training the GRIDAE

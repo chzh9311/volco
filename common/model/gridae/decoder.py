@@ -79,8 +79,10 @@ class GridDecoder3Dv2(nn.Module):
     """
     Encode the object local grid into multi-scale latent features
     """
-    def __init__(self, latent_dim, h_dims, res_expansion, n_res_layers, out_dim, N, condition_dim=None):
+    def __init__(self, latent_dim, h_dims, res_expansion, n_res_layers, out_dim, N, condition_dim=None,
+                 norm='bn', num_groups=8):
         super(GridDecoder3Dv2, self).__init__()
+        norm_kw = dict(norm=norm, num_groups=num_groups)
         self.h_dim0 = h_dims[0]
         self.num_layers = len(h_dims)
         # Mirror the encoder's downsampling: for N==4 one upsample is a stride-1
@@ -106,9 +108,9 @@ class GridDecoder3Dv2(nn.Module):
         for i in range(self.num_layers):
             out_channels = h_dims[-1] if i == self.num_layers - 1 else h_dims[i+1]
             # First deconv: 3x3 to process features
-            deconv1 = Deconv3D(h_dims[i], h_dims[i], kernel_size=3, stride=1, padding=1)
+            deconv1 = Deconv3D(h_dims[i], h_dims[i], kernel_size=3, stride=1, padding=1, **norm_kw)
             # First conv: 1x1 to change channels
-            deconv2 = Conv3D(h_dims[i] + condition_dim[i+1], out_channels, kernel_size=1, stride=1, padding=0)
+            deconv2 = Conv3D(h_dims[i] + condition_dim[i+1], out_channels, kernel_size=1, stride=1, padding=0, **norm_kw)
 
             self.deconv_layers.append(nn.ModuleList([deconv1, deconv2]))
 
@@ -116,9 +118,9 @@ class GridDecoder3Dv2(nn.Module):
             if i < self.num_layers - 1:
                 if N == 4 and i == self.num_layers - 2:
                     ## Do not up sample in the last layer if N==4,
-                    self.upsample_layers.append(Deconv3D(out_channels, out_channels, kernel_size=1, stride=1, padding=0))
+                    self.upsample_layers.append(Deconv3D(out_channels, out_channels, kernel_size=1, stride=1, padding=0, **norm_kw))
                 else:
-                    self.upsample_layers.append(Deconv3D(out_channels, out_channels, kernel_size=2, stride=2, padding=0))
+                    self.upsample_layers.append(Deconv3D(out_channels, out_channels, kernel_size=2, stride=2, padding=0, **norm_kw))
 
         self.final_cse = nn.Conv3d(h_dims[-1], out_dim-1, kernel_size=1,
                             stride=1, padding=0)

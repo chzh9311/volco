@@ -96,20 +96,27 @@ class GRIDAEResidualv2(GRIDAEAbstract):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
+        # Normalization for the volumetric blocks. Defaults to 'bn' so existing
+        # checkpoints keep loading; set norm: gn in the ae config to drop the
+        # BatchNorm running buffers (see make_norm3d).
+        norm = cfg.get('norm', 'bn')
+        num_groups = cfg.get('num_groups', 8)
         self.obj_encoder = GridEncoder3Dv2(in_dim=cfg.obj_in_dim,
                                          h_dims=cfg.obj_h_dims,
                                          res_expansion=cfg.obj_res_expansion,
                                          n_res_layers=cfg.obj_n_res_layers,
                                          feat_dim=cfg.obj_feat_dim,
                                          N=cfg.kernel_size,
-                                         condition_dim=None)
+                                         condition_dim=None,
+                                         norm=norm, num_groups=num_groups)
         self.encoder = GridEncoder3Dv2(in_dim=cfg.in_dim,
                                      h_dims=cfg.h_dims,
                                      res_expansion=cfg.res_expansion,
                                      n_res_layers=cfg.n_res_layers,
                                      feat_dim=cfg.feat_dim*2,
                                      N=cfg.kernel_size,
-                                     condition_dim=cfg.obj_h_dims + [cfg.obj_feat_dim])
+                                     condition_dim=cfg.obj_h_dims + [cfg.obj_feat_dim],
+                                     norm=norm, num_groups=num_groups)
         # pass continuous latent vector through discretization bottleneck
         # decode the discrete latent representation
         # self.obj_decoder = Decoder(h_dims[-1], h_dims[::-1], obj_in_dim, obj_n_res_layers, obj_res_h_dim, condition=True, final_layer=False)
@@ -119,4 +126,5 @@ class GRIDAEResidualv2(GRIDAEAbstract):
                                      n_res_layers=cfg.n_res_layers,
                                      out_dim=cfg.out_dim,
                                      N=cfg.kernel_size,
-                                     condition_dim=[cfg.obj_feat_dim] + cfg.obj_h_dims[::-1])
+                                     condition_dim=[cfg.obj_feat_dim] + cfg.obj_h_dims[::-1],
+                                     norm=norm, num_groups=num_groups)

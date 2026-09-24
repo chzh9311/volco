@@ -1,7 +1,8 @@
 defaults:
-  - msdf: "64_4"
+  - msdf: "sparse"
   - data: grab_local_grid
-  - ae: gridae_64latent_v2
+  - ae: gridae_128latent_v2_gn
+  # - ae: gridae_32latent_v2_gn
   - _self_
 
 training_stage: "ae"
@@ -22,7 +23,7 @@ train:
   vis_every_n_batches: 10000
   # resume_ckpt: logs/wandb_logs/LG3DContact/GRIDAE-64v2/epoch=4-wcserec.ckpt
   # pretrained_ckpt: logs/checkpoints/gridae/128latent/best-epoch=22-val/total_loss=0.0970.ckpt
-  resume_ckpt: 
+  resume_ckpt: # logs/wandb_logs/LG3DContact/cub3yghu/checkpoints/last.ckpt
 
 val:
   batch_size: 256
@@ -35,12 +36,12 @@ test:
   vis_every_n_batches: 1
 
 checkpoint:
-  dirpath: logs/checkpoints/gridae/${ae.feat_dim}latent/
+  dirpath: logs/checkpoints/gridae/gn/${ae.feat_dim}latent/
   filename: best
   save_top_k: 3
 
 trainer: ## For instantiating pytorch-lightning Trainer
-  max_epochs: 20
+  max_epochs: 100
   check_val_every_n_epoch: 1
   log_every_n_steps: 100
   accelerator: gpu
@@ -55,7 +56,7 @@ trainer: ## For instantiating pytorch-lightning Trainer
 run_phase: train
 # ckpt_path: logs/checkpoints/gridae/128latent/best-epoch=16-val/total_loss=0.0948.ckpt
 # ckpt_path: # logs/checkpoints/gridae/128latent-v2/best-20epoch.ckpt
-ckpt_path: logs/checkpoints/gridae/mlpres_v2/128latent-contactonly/best.ckpt
+ckpt_path: # logs/checkpoints/gridae/mlpres_v2/128latent-contactonly/best.ckpt
 # ckpt_path: # logs/checkpoints/gridae/mlpres_v2/256latent/best.ckpt
 
 hydra:

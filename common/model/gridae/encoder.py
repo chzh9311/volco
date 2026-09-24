@@ -139,31 +139,33 @@ class GridEncoder3Dv2(nn.Module):
     """
     Encode the object local grid into multi-scale latent features
     """
-    def __init__(self, in_dim, h_dims, res_expansion, n_res_layers, feat_dim, N, condition_dim=None):
+    def __init__(self, in_dim, h_dims, res_expansion, n_res_layers, feat_dim, N, condition_dim=None,
+                 norm='bn', num_groups=8):
         super(GridEncoder3Dv2, self).__init__()
         self.num_layers = len(h_dims)
         self.conv_layers = nn.ModuleList()
         self.downsample_layers = nn.ModuleList()
+        norm_kw = dict(norm=norm, num_groups=num_groups)
 
         if condition_dim is None:
             condition_dim = [0] * (self.num_layers + 1)
         for i in range(self.num_layers):
             in_channels = in_dim if i == 0 else h_dims[i-1]
             # First conv: 1x1 to change channels
-            conv1 = Conv3D(in_channels, h_dims[i], kernel_size=1, stride=1, padding=0)
+            conv1 = Conv3D(in_channels, h_dims[i], kernel_size=1, stride=1, padding=0, **norm_kw)
             # Second conv: 3x3 to process features
-            conv2 = Conv3D(h_dims[i] + condition_dim[i], h_dims[i], kernel_size=3, stride=1, padding=1)
+            conv2 = Conv3D(h_dims[i] + condition_dim[i], h_dims[i], kernel_size=3, stride=1, padding=1, **norm_kw)
             self.conv_layers.append(nn.ModuleList([conv1, conv2]))
 
             # Pool layer (not used after the last layer group)
             if i < self.num_layers - 1:
                 if i == 0 and N == 4:
                     # do not downsample:
-                    self.downsample_layers.append(Conv3D(h_dims[i], h_dims[i], kernel_size=1, stride=1, padding=0))
+                    self.downsample_layers.append(Conv3D(h_dims[i], h_dims[i], kernel_size=1, stride=1, padding=0, **norm_kw))
                 else:
                     # self.pool_layers.append(MaxPool3D(kernel_size=2))
                     ## Use strided conv for downsampling to restore the maximum information
-                    self.downsample_layers.append(Conv3D(h_dims[i], h_dims[i], kernel_size=2, stride=2, padding=0))
+                    self.downsample_layers.append(Conv3D(h_dims[i], h_dims[i], kernel_size=2, stride=2, padding=0, **norm_kw))
         
         # Count the downsamples that actually halve the resolution. For N==4 the
         # first downsample (i==0) is a stride-1 no-op, so one fewer halving occurs.

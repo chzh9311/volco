@@ -36,12 +36,41 @@ class UpSample3D(nn.Module):
         return self.upscale(x)
 
 
+def make_norm3d(num_channels, norm='bn', num_groups=8):
+    """
+    Build a normalization layer for volumetric (B, C, N, N, N) features.
+
+    'bn' keeps the original BatchNorm3d behaviour. 'gn' uses GroupNorm, which
+    normalizes over (C//num_groups, N, N, N) within each sample and therefore
+    keeps no running statistics: a transient activation blow-up cannot leave
+    behind permanently corrupted buffers that silently zero the layer in eval
+    mode. 'in' is GroupNorm with one group per channel (InstanceNorm), 'none'
+    skips normalization entirely.
+    """
+    if norm == 'bn':
+        return nn.BatchNorm3d(num_channels)
+    if norm == 'gn':
+        # GroupNorm requires num_channels % num_groups == 0; fall back to the
+        # largest divisor not exceeding the requested count so narrow layers
+        # (e.g. the 1-channel SDF stem) stay valid.
+        groups = min(num_groups, num_channels)
+        while num_channels % groups != 0:
+            groups -= 1
+        return nn.GroupNorm(groups, num_channels)
+    if norm == 'in':
+        return nn.GroupNorm(num_channels, num_channels)
+    if norm == 'none':
+        return nn.Identity()
+    raise ValueError(f"Unknown norm type: {norm}")
+
+
 class Conv3D(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0,
+                 norm='bn', num_groups=8):
         super(Conv3D, self).__init__()
         self.conv = nn.Sequential(
             nn.Conv3d(in_channels, out_channels, kernel_size, stride, padding),
-            nn.BatchNorm3d(out_channels),
+            make_norm3d(out_channels, norm=norm, num_groups=num_groups),
             nn.LeakyReLU(negative_slope=0.2, inplace=True),
         )
 
@@ -50,11 +79,12 @@ class Conv3D(nn.Module):
 
 
 class Deconv3D(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0,
+                 norm='bn', num_groups=8):
         super(Deconv3D, self).__init__()
         self.conv = nn.Sequential(
             nn.ConvTranspose3d(in_channels, out_channels, kernel_size, stride, padding),
-            nn.BatchNorm3d(out_channels),
+            make_norm3d(out_channels, norm=norm, num_groups=num_groups),
             nn.LeakyReLU(negative_slope=0.2, inplace=True),
         )
 
