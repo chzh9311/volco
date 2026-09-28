@@ -59,6 +59,10 @@ def _to_canonical(hand_verts, hand_joints, obj_rot_aa, obj_trans, obj_com, datas
 
 @hydra.main(version_base=None, config_path="../config", config_name="mlcdiff")
 def main(cfg):
+    if cfg.get('vis', False):  # python scripts/gt_validator.py +vis=true
+        visualize_gt_contact(cfg)
+        return
+
     closed_mano_faces = np.load(osp.join('data', 'misc', 'closed_mano_r_faces.npy'))
     dataset_name = cfg.data.dataset_name
 
@@ -157,6 +161,69 @@ def main(cfg):
     with open(save_path, 'wb') as f:
         pickle.dump(all_results, f)
     print(f"Saved GT penetration analysis ({sum(len(v) for v in all_results.values())} samples) to {save_path}")
+
+
+## Load GT data and visualize contact
+def visualize_gt_contact(cfg, n_vis=8, side=800, out_dir=osp.join('tmp', 'gt_contact_vis'), seed=0):
+    """
+    Load GT grasps from the test split, build a HandObject with point-based contact,
+    and save one image per sample with 3 columns: object | object + hand | object contact.
+    Each column stacks the 4 camera views of geom_to_img_o3d vertically.
+    Contact on the object mesh: each vertex takes the contact value of its nearest
+    sampled point (HandObject.obj_verts), colored with the YlOrRd colormap.
+    """
+    from scipy.spatial import cKDTree
+    from matplotlib import pyplot as plt
+    from common.model.handobject import HandObject
+    from common.utils.vis import o3dmesh_from_trimesh, parse_hex_color, geom_to_img_o3d
+    import open3d as o3d
+
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    # Force point-based contact regardless of the top-level config
+    data_cfg = OmegaConf.create(OmegaConf.to_container(cfg.data, resolve=True))
+    data_cfg.contact_unit = 'point'
+    data_cfg.correspondence_type = 'cse'
+
+    dataset_cls = HOIDatasetModule(cfg).dataset_class
+    test_set = dataset_cls(data_cfg, 'test', load_msdf=False, load_grid_contact=False, object_only=False)
+    obj_meshes_by_name = {n: trimesh.Trimesh(v['verts'], v['faces'], process=False)
+                          for n, v in test_set.obj_info.items()}
+
+    loader = DataLoader(test_set, batch_size=n_vis, shuffle=True, num_workers=4,
+                        collate_fn=HOIDatasetModule.collate_fn,
+                        generator=torch.Generator().manual_seed(seed))
+    batch = next(iter(loader))
+    obj_names = batch['objName']
+
+    ho = HandObject(data_cfg, device=device, normalize=True)
+    ho.load_from_batch(batch, obj_templates=[obj_meshes_by_name[n] for n in obj_names])
+
+    heat_cmap = plt.colormaps['YlOrRd']
+    os.makedirs(out_dir, exist_ok=True)
+    for i in range(ho.batch_size):
+        obj_mesh = ho.obj_models[i]  # CoM-centered, same frame as ho.obj_verts / ho.hand_verts
+        hand_mesh = trimesh.Trimesh(ho.hand_verts[i].detach().cpu().numpy(), ho.closed_hand_faces.copy())
+
+        # Per-vertex contact from the nearest sampled point
+        sample_pts = ho.obj_verts[i].detach().cpu().numpy()             # (N, 3)
+        sample_contact = ho.contact_map[i, :, 0].detach().cpu().numpy()  # (N,)
+        _, nn_idx = cKDTree(sample_pts).query(np.asarray(obj_mesh.vertices))
+        vert_contact = np.clip(sample_contact[nn_idx], 0, 1)
+
+        obj_plain = o3dmesh_from_trimesh(obj_mesh, parse_hex_color("#6293A8"))
+        obj_contact = o3dmesh_from_trimesh(obj_mesh)
+        obj_contact.vertex_colors = o3d.utility.Vector3dVector(heat_cmap(vert_contact)[:, :3])
+        hand = o3dmesh_from_trimesh(hand_mesh, parse_hex_color("#F29A8D"))
+
+        panels = [[obj_plain], [obj_plain, hand], [obj_contact]]
+        imgs = [geom_to_img_o3d(p, w=side, h=side, scale=0.9, concat_axis=0) for p in panels]
+        row = np.clip(np.concatenate(imgs, axis=1), 0, 1)
+
+        save_path = osp.join(out_dir, f'{i:03d}_{obj_names[i]}.png')
+        plt.imsave(save_path, row)
+        print(f"[{i}] {obj_names[i]}: contact max={sample_contact.max():.3f}, "
+              f"#pts>0.5={(sample_contact > 0.5).sum()} -> {save_path}")
 
 
 if __name__ == '__main__':

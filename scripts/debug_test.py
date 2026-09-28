@@ -1,4 +1,5 @@
 import os
+import os.path as osp
 import random
 from einops.array_api import rearrange
 import torch
@@ -222,14 +223,14 @@ def vis_local_grid_interact(cfg):
     dm = LocalGridDataModule(cfg)
     mano_layer = ManoLayer(mano_root = cfg.data.mano_root, use_pca=False, side='right', flat_hand_mean=True, ncomps=45)
     hand_faces = mano_layer.th_faces.numpy()
-    dm.prepare_data()
-    phase = 'test'
-    dm.setup('test')
+    # dm.prepare_data()
+    phase = 'validate'
+    dm.setup(phase)
     # train_loader = dm.train_dataloader()
     if phase == 'validate' or phase == 'train':
         loader = dm.val_dataloader()
-        train_dataset = dm.train_set
-        print("training dataset size:", len(train_dataset))
+        # train_dataset = dm.train_set
+        # print("training dataset size:", len(train_dataset))
         dataset = dm.val_set
         print("validation dataset size:", len(dataset))
     else:
@@ -237,12 +238,24 @@ def vis_local_grid_interact(cfg):
         dataset = dm.test_set
         print(f"test dataset size: {len(dataset)}")
     # test_loader = dm.test_dataloader()
-    return
+    # return
+    index_tip_vid = 317  # MANO index fingertip vertex (same as ManoLayer tips)
+    n_vis, max_vis = 0, 10
+    export_video = True  # True: render animate_local_grid_section to mp4; False: interactive Open3D window
     for batch_idx, batch in tqdm(enumerate(loader), total=len(loader), desc=f"Visualizing {phase} data"):
+        if batch_idx % 100 != 0 and batch_idx < 200:
+            continue
         grid_data = torch.cat([batch['gridSDF'], batch['gridContact'], batch['gridHandCSE']], dim=-1)  # (B, K, K, K, C)
         batch_size = grid_data.shape[0]
-        for b in range(10):
-            # break
+        # nHandVerts are relative to the grid center; the grid spans [-scale, scale] per axis
+        index_tip = batch['nHandVerts'][:, index_tip_vid]  # (B, 3)
+        tip_in_grid = (index_tip.abs() <= cfg.msdf.scale).all(dim=-1)  # (B,)
+        for b in torch.nonzero(tip_in_grid).flatten().tolist():
+            if b > 2:
+                continue  # Only visualize first 3 samples in batch
+            if n_vis >= max_vis:
+                return
+            n_vis += 1
             # Extract data for this sample
             local_grid = grid_data[b].cpu().numpy()  # (K, K, K, C)
             contact_point = batch['objSamplePt'][b].cpu().numpy()  # (3,)
@@ -268,12 +281,328 @@ def vis_local_grid_interact(cfg):
 
             # Visualize
             print(f"\nVisualizing sample {b} from batch {batch_idx} (object: {obj_name})")
-            geoms = visualize_local_grid_with_hand(local_grid, hand_verts, hand_faces, dataset.hand_cse, cfg.msdf.kernel_size,
-                                           cfg.msdf.scale, contact_point=contact_point, obj_mesh=obj_mesh)
-            o3d.visualization.draw_geometries(geoms)
+            if export_video:
+                # Full-res object mesh + closed hand for clean close-ups and watertight sections
+                full_obj = dataset.obj_info.get(obj_name, {})
+                if 'verts' in full_obj:
+                    obj_mesh = trimesh.Trimesh((objR @ full_obj['verts'].T).T + obj_trans, full_obj['faces'], process=False)
+                hand_mesh = trimesh.Trimesh(hand_verts, dataset.close_mano_faces, process=False)
+                out_path = osp.join('tmp', 'local_grid_anim', f'{batch_idx:04d}_{b:03d}_{obj_name}.mp4')
+                animate_local_grid_section(hand_mesh, obj_mesh, contact_point, cfg.msdf.scale,
+                                           hand_verts[index_tip_vid], out_path)
+            else:
+                geoms = visualize_local_grid_with_hand(local_grid, hand_verts, hand_faces, dataset.hand_cse, cfg.msdf.kernel_size,
+                                               cfg.msdf.scale, contact_point=contact_point, obj_mesh=obj_mesh)
+                o3d.visualization.draw_geometries(geoms)
             # break
         # Only visualize first batch
         # break
+
+
+## ---- Local grid animation: full scene -> crop to grid -> zoom to sectional view ---- ##
+
+def _split_mesh_by_halfspaces(verts, faces, normals, offsets):
+    """
+    Split a triangle mesh by the convex region {p : n_i . p <= d_i for all i}.
+    Straddling triangles are cut exactly (sequential Sutherland-Hodgman), so the
+    inside and outside parts share their boundary.
+    Returns (inside_verts, inside_faces), (outside_verts, outside_faces).
+    """
+    normals = np.asarray(normals, dtype=np.float64)
+    offsets = np.asarray(offsets, dtype=np.float64)
+    verts = np.asarray(verts, dtype=np.float64)
+    faces = np.asarray(faces)
+    vert_out = verts @ normals.T > offsets[None]  # (V, P): vertex violates plane
+    tri_out = vert_out[faces]                        # (F, 3, P)
+    fully_in = ~tri_out.any(axis=(1, 2))
+    fully_out = tri_out.all(axis=1).any(axis=-1)     # all 3 verts beyond one plane
+    straddle = ~(fully_in | fully_out)
+
+    def _clip(poly, n, d, keep_inside):
+        out = []
+        for i in range(len(poly)):
+            a, b = poly[i], poly[(i + 1) % len(poly)]
+            da, db = a @ n - d, b @ n - d
+            a_in = da <= 0 if keep_inside else da >= 0
+            b_in = db <= 0 if keep_inside else db >= 0
+            if a_in:
+                out.append(a)
+            if a_in != b_in:
+                out.append(a + da / (da - db) * (b - a))
+        return out
+
+    pieces_in, pieces_out = [], []
+    for tri in faces[straddle]:
+        poly = [verts[i] for i in tri]
+        for n, d in zip(normals, offsets):
+            outside_piece = _clip(poly, n, d, keep_inside=False)
+            if len(outside_piece) >= 3:
+                pieces_out.append(outside_piece)
+            poly = _clip(poly, n, d, keep_inside=True)
+            if len(poly) < 3:
+                break
+        if len(poly) >= 3:
+            pieces_in.append(poly)
+
+    def _assemble(tri_faces, polys):
+        # Whole triangles keep the original vertex buffer; clipped polygons are fan-triangulated
+        v_list, f_list = [verts], [tri_faces]
+        base = len(verts)
+        for poly in polys:
+            v_list.append(np.asarray(poly))
+            f_list.append(np.array([[base, base + k, base + k + 1] for k in range(1, len(poly) - 1)]))
+            base += len(poly)
+        f = np.concatenate([x.reshape(-1, 3) for x in f_list], axis=0).astype(np.int64)
+        m = trimesh.Trimesh(np.concatenate(v_list, axis=0), f, process=False)
+        m.remove_unreferenced_vertices()
+        return m.vertices, m.faces
+
+    return _assemble(faces[fully_in], pieces_in), _assemble(faces[fully_out], pieces_out)
+
+
+def _section_cap(mesh, origin, normal, u, v, half_extent):
+    """
+    Filled cross-section of a (closed) mesh on the plane (origin, normal), cropped to the
+    square [-half_extent, half_extent]^2 spanned by (u, v). Returns (verts, faces) or None.
+    """
+    from shapely.geometry import box as shapely_box
+    to_2d = np.eye(4)
+    to_2d[:3, :3] = np.stack([u, v, normal], axis=0)
+    to_2d[:3, 3] = -to_2d[:3, :3] @ origin
+    section = mesh.section(plane_origin=origin, plane_normal=normal)
+    if section is None:
+        return None
+    try:
+        planar, _ = section.to_planar(to_2D=to_2d, check=False)
+        polygons = planar.polygons_full
+    except Exception:
+        return None
+    crop = shapely_box(-half_extent, -half_extent, half_extent, half_extent)
+    v_list, f_list, base = [], [], 0
+    for poly in polygons:
+        clipped = poly.intersection(crop)
+        for part in getattr(clipped, 'geoms', [clipped]):
+            if part.is_empty or part.geom_type != 'Polygon' or part.area < 1e-12:
+                continue
+            v2, f = trimesh.creation.triangulate_polygon(part, engine='triangle')
+            v_list.append(origin[None] + v2[:, :1] * u[None] + v2[:, 1:2] * v[None])
+            f_list.append(f + base)
+            base += len(v2)
+    if not v_list:
+        return None
+    verts, faces = np.concatenate(v_list), np.concatenate(f_list)
+    # Orient caps towards the camera side of the plane
+    tri = verts[faces]
+    if np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]).sum(axis=0) @ normal < 0:
+        faces = faces[:, ::-1]
+    return verts, faces
+
+
+_OFFSCREEN_RENDERER = None
+
+
+def animate_local_grid_section(hand_mesh, obj_mesh, center, scale, tip, out_path,
+                               w=960, h=960, fps=30, up=(0.0, 0.0, 1.0), fov=30.0,
+                               hand_color="#F2A98D", obj_color="#6293A8", bbox_color="#102540",
+                               cap_shade=0.85, tip_radius=0.008,
+                               durations=(1.0, 1.0, 0.5, 1.5, 0.5, 2.0, 1.5, 1.5)):
+    """
+    Render a video of one local grid:
+      1. hold: full hand + object only
+      2. grid bbox (wireframe only) gradually appears
+      3. hold: full hand + object + grid bbox
+      4. fade: parts outside the bbox vanish, parts inside remain
+      5. hold
+      6. camera zooms onto the bbox and levels to a horizontal view
+      7. section plane sweeps from the bbox front face to the index fingertip (filled caps)
+      8. hold on the sectional view of the fingertip-object contact
+
+    :param hand_mesh: trimesh, closed MANO hand in the same frame as obj_mesh
+    :param obj_mesh: trimesh object mesh
+    :param center: (3,) grid center; the grid spans center +- scale per axis
+    :param tip: (3,) index fingertip vertex; the section plane passes through the centroid of
+                hand vertices within tip_radius of it (i.e. through the finger, not its surface)
+    :param cap_shade: brightness factor of the flat fill drawn on cut surfaces
+    :param durations: seconds for stages 1-8
+    """
+    import imageio
+    from open3d.visualization import rendering
+
+    center = np.asarray(center, dtype=np.float64)
+    tip = np.asarray(tip, dtype=np.float64)
+    up = np.asarray(up, dtype=np.float64)
+    up = up / np.linalg.norm(up)
+    bmin, bmax = center - scale, center + scale
+    eye3 = np.eye(3)
+    box_normals = np.concatenate([eye3, -eye3], axis=0)
+    box_offsets = np.concatenate([bmax, -bmin], axis=0)
+
+    # Horizontal view direction: a bbox axis perpendicular to `up`, chosen so the local contact
+    # normal lies in the image plane (the fingertip-object gap is seen from the side).
+    closest, _, _ = trimesh.proximity.closest_point(obj_mesh, tip[None])
+    contact_n = tip - closest[0]
+    contact_n = contact_n / (np.linalg.norm(contact_n) + 1e-12)
+    horiz_axes = [a for a in eye3 if abs(a @ up) < 0.5]
+    view_axis = min(horiz_axes, key=lambda a: abs(a @ contact_n))
+    # Camera on the side away from the hand body, so the hand is not in front of the fingertip
+    hand_side = (hand_mesh.vertices.mean(axis=0) - tip) @ view_axis
+    view_dir = -view_axis if hand_side > 0 else view_axis   # unit vector from center towards camera
+    sec_u = np.cross(up, view_dir)
+    sec_v = up.copy()
+
+    # Camera keyframes (spherical interpolation around the grid center)
+    def _dir(azim, elev):
+        right = np.cross(up, view_dir)
+        horiz = np.cos(azim) * view_dir + np.sin(azim) * right
+        return np.cos(elev) * horiz + np.sin(elev) * up
+
+    tan_half = np.tan(np.radians(fov) / 2)
+
+    def _fit_dist(pts, azim, elev, margin):
+        # Smallest camera distance (looking at `center`) whose square frustum contains all pts
+        d = _dir(azim, elev)
+        right = np.cross(d, up)
+        right = right / np.linalg.norm(right)
+        cam_up = np.cross(right, d)
+        rel = pts - center
+        extent = np.maximum(np.abs(rel @ right), np.abs(rel @ cam_up)) * margin
+        return (rel @ d + extent / tan_half).max()
+
+    all_verts = np.concatenate([hand_mesh.vertices, obj_mesh.vertices], axis=0)
+    box_corners = center + scale * np.array([[x, y, z] for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)])
+    cam_far = dict(azim=np.radians(40), elev=np.radians(30))
+    cam_far['dist'] = _fit_dist(all_verts, cam_far['azim'], cam_far['elev'], margin=1.1)
+    cam_near = dict(azim=0.0, elev=0.0)
+    cam_near['dist'] = _fit_dist(box_corners, cam_near['azim'], cam_near['elev'], margin=1.3)
+
+    # Split meshes once for the fade stage
+    (hin_v, hin_f), (hout_v, hout_f) = _split_mesh_by_halfspaces(hand_mesh.vertices, hand_mesh.faces, box_normals, box_offsets)
+    (oin_v, oin_f), (oout_v, oout_f) = _split_mesh_by_halfspaces(obj_mesh.vertices, obj_mesh.faces, box_normals, box_offsets)
+
+    def _o3d_mesh(v, f):
+        m = o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(v), o3d.utility.Vector3iVector(f))
+        m.compute_vertex_normals()
+        return m
+
+    def _material(color, alpha=1.0):
+        mat = rendering.MaterialRecord()
+        mat.shader = 'defaultLit' if alpha >= 0.999 else 'defaultLitTransparency'
+        mat.base_color = [*parse_hex_color(color), alpha]
+        mat.base_roughness = 0.7
+        return mat
+
+    def cap_material(color):
+        mat = _material(color)
+        mat.base_color = [*(np.asarray(parse_hex_color(color)) * cap_shade), 1.0]
+        return mat
+
+    def _cap_mesh(v, f):
+        # Constant normal facing the camera -> uniform flat fill
+        m = o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(v), o3d.utility.Vector3iVector(f))
+        m.vertex_normals = o3d.utility.Vector3dVector(np.repeat(view_dir[None], len(v), axis=0))
+        return m
+
+    hand_in, hand_out = _o3d_mesh(hin_v, hin_f), _o3d_mesh(hout_v, hout_f)
+    obj_in, obj_out = _o3d_mesh(oin_v, oin_f), _o3d_mesh(oout_v, oout_f)
+
+    corners = np.array([[x, y, z] for x in (0, 1) for y in (0, 1) for z in (0, 1)], dtype=np.float64)
+    bbox_ls = o3d.geometry.LineSet()
+    bbox_ls.points = o3d.utility.Vector3dVector(bmin + corners * 2 * scale)
+    bbox_ls.lines = o3d.utility.Vector2iVector([[0, 1], [0, 2], [0, 4], [1, 3], [1, 5], [2, 3],
+                                                [2, 6], [3, 7], [4, 5], [4, 6], [5, 7], [6, 7]])
+    def _line_material(t):
+        # Line alpha is not blended by Filament; fade in by blending from white instead
+        # (a white line renders identical to the background)
+        mat = rendering.MaterialRecord()
+        mat.shader = 'unlitLine'
+        mat.base_color = [*((1 - t) * np.ones(3) + t * np.asarray(parse_hex_color(bbox_color))), 1.0]
+        mat.line_width = 3.0
+        return mat
+
+    # Filament segfaults when a second OffscreenRenderer is created in one process, so reuse it
+    global _OFFSCREEN_RENDERER
+    if _OFFSCREEN_RENDERER is None:
+        _OFFSCREEN_RENDERER = rendering.OffscreenRenderer(w, h)
+    renderer = _OFFSCREEN_RENDERER
+    scene = renderer.scene
+    scene.clear_geometry()
+    scene.set_background([1.0, 1.0, 1.0, 1.0])
+
+    def _set(name, geom, mat):
+        if scene.has_geometry(name):
+            scene.remove_geometry(name)
+        if geom is not None:
+            scene.add_geometry(name, geom, mat)
+
+    def _set_camera(cam):
+        eye = center + cam['dist'] * _dir(cam['azim'], cam['elev'])
+        # Explicit clip planes: the automatic near plane clips everything in the close-up
+        renderer.setup_camera(fov, center.tolist(), eye.tolist(), up.tolist(),
+                              0.01 * cam['dist'], 10.0 * cam_far['dist'])
+
+    def _lerp_cam(t):
+        return {k: (1 - t) * cam_far[k] + t * cam_near[k] for k in cam_far}
+
+    def _smooth(t):
+        t = np.clip(t, 0.0, 1.0)
+        return t * t * (3 - 2 * t)
+
+    os.makedirs(osp.dirname(out_path) or '.', exist_ok=True)
+    writer = imageio.get_writer(out_path, fps=fps, codec='libx264', quality=8, macro_block_size=16)
+
+    def _emit(n_frames, update):
+        for i in range(n_frames):
+            update(i / max(n_frames - 1, 1))
+            writer.append_data(np.asarray(renderer.render_to_image()))
+
+    n = [max(int(round(d * fps)), 1) for d in durations]
+    _set('hand_in', hand_in, _material(hand_color))
+    _set('obj_in', obj_in, _material(obj_color))
+    _set('hand_out', hand_out, _material(hand_color))
+    _set('obj_out', obj_out, _material(obj_color))
+    _set_camera(cam_far)
+
+    # 1. Hand + object only
+    _emit(n[0], lambda t: None)
+
+    # 2. Bbox gradually appears, then hold on the full scene with bbox
+    _emit(n[1], lambda t: _set('bbox', bbox_ls, _line_material(_smooth(t))))
+    _emit(n[2], lambda t: None)
+
+    # 4. Outside parts fade away
+    def _stage_fade(t):
+        alpha = 1.0 - _smooth(t)
+        _set('hand_out', hand_out if alpha > 1e-3 else None, _material(hand_color, alpha))
+        _set('obj_out', obj_out if alpha > 1e-3 else None, _material(obj_color, alpha))
+    _emit(n[3], _stage_fade)
+    _emit(n[4], lambda t: None)
+
+    # 6. Zoom in + level to horizontal view
+    _emit(n[5], lambda t: _set_camera(_lerp_cam(_smooth(t))))
+
+    # 7. Section plane sweeps from the bbox front face to the fingertip. The tip vertex lies on the
+    # finger surface, so cut through the finger interior (centroid of vertices near the tip) instead.
+    tip_verts = hand_mesh.vertices[np.linalg.norm(hand_mesh.vertices - tip, axis=1) < tip_radius]
+    tip_core = tip_verts.mean(axis=0) if len(tip_verts) else tip
+    s_front, s_tip = scale, np.clip((tip_core - center) @ view_dir, -scale, scale)
+    def _stage_section(t):
+        s = (1 - _smooth(t)) * s_front + _smooth(t) * s_tip
+        origin = center + s * view_dir
+        normals = np.concatenate([box_normals, view_dir[None]], axis=0)
+        offsets = np.concatenate([box_offsets, [origin @ view_dir]], axis=0)
+        for name, mesh, color in [('hand', hand_mesh, hand_color), ('obj', obj_mesh, obj_color)]:
+            (v, f), _ = _split_mesh_by_halfspaces(mesh.vertices, mesh.faces, normals, offsets)
+            _set(f'{name}_in', _o3d_mesh(v, f) if len(f) else None, _material(color))
+            cap = _section_cap(mesh, origin, view_dir, sec_u, sec_v, scale)
+            # Flat, slightly darker fill marks the cut surface
+            _set(f'{name}_cap', _cap_mesh(*cap) if cap is not None else None, cap_material(color))
+    _emit(n[6], _stage_section)
+
+    # 8. Hold on the sectional view
+    _emit(n[7], lambda t: None)
+
+    writer.close()
+    print(f"Saved animation to {out_path}")
 
 
 def test_obj():
@@ -781,7 +1110,7 @@ if __name__ == "__main__":
     # test_ho3d_dataloader()
     # vis_msdf_data_sample()
     # test_obj()
-    # vis_local_grid_interact()
+    vis_local_grid_interact()
     # test_pointvae()
     # compare_ckpt()
     # test_hoi4d_datamodule()
