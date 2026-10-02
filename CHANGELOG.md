@@ -2,6 +2,17 @@
 ## [Unreleased]
 
 
+<a name="pre-release-archive"></a>
+## [pre-release-archive] - 2026-10-02
+### Code Refactoring
+- new file structure for new types of VolCo settings.
+
+### Features
+- auxiliary supervision branch for object feature extraction.
+- new volumeVAE configs.
+- Avoid grid collapse when N=4.
+
+
 <a name="v1.2.0"></a>
 ## [v1.2.0] - 2026-03-13
 ### Bug Fixes
@@ -136,7 +147,8 @@
 - Enable dumping local grids first.
 
 
-[Unreleased]: /compare/v1.2.0...HEAD
+[Unreleased]: /compare/pre-release-archive...HEAD
+[pre-release-archive]: /compare/v1.2.0...pre-release-archive
 [v1.2.0]: /compare/v1.1.1...v1.2.0
 [v1.1.1]: /compare/v1.1.0...v1.1.1
 [v1.1.0]: /compare/v1.0.1...v1.1.0
