@@ -76,7 +76,7 @@ test_gt: false
 ckpt_path: ${generator.checkpoint_path}
 optimizer: adamw
 
-debug: true
+debug: false
 
 hydra:
   job:

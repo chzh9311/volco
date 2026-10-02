@@ -1,8 +1,9 @@
 defaults:
-  - msdf: "sparse"
+  - msdf: "64_4"
   - data: grab_local_grid
-  - ae: gridae_128latent_v2_gn
-  # - ae: gridae_32latent_v2_gn
+  # - ae: gridae_128latent_v2_gn
+  # - ae: gridae_128latent_v3_gn
+  - ae: gridae_64latent_v3_gn
   - _self_
 
 training_stage: "ae"
@@ -18,6 +19,7 @@ train:
     w_cse_value: 1.0
     w_kl: 0.000001
     w_rec: 0.0
+    w_obj_rec: 0.1
   rec_loss_start_epoch: null
   log_every_n_batches: 100
   vis_every_n_batches: 10000

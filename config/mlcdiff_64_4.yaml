@@ -46,7 +46,7 @@ test:
   n_processes: 20
   n_samples: 20
   batch_size: ${test.n_samples}
-  vis_result: true  # set to false to skip rendering and remove image columns from wandb table
+  vis_result: false  # set to false to skip rendering and remove image columns from wandb table
   use_cache: false  # if true, reuse cached hand results (tmp/grab/result_{obj}.pkl) instead of rerunning diffusion + pose optimization
   base_criteria:
     - "Simulation Displacement"

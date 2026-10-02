@@ -120,8 +120,22 @@ def main(cfg):
             print('total keys in ckpt:', len(sd.keys()))
             load_pl_ckpt(gridae, sd, prefix='grid_ae.')
             load_pl_ckpt(model, sd, prefix='model.')
-            load_pl_ckpt(hand_ae, sd, prefix='hand_ae.')
-            unused_keys = [k for k in sd.keys() if not (k.startswith('grid_ae.') or k.startswith('model.') or k.startswith('hand_ae.'))]
+            # LGCDiffTrainer does not register hand_ae as a submodule, so checkpoints
+            # from that trainer carry no 'hand_ae.' keys. Fall back to the hand VAE's
+            # own pretrained checkpoint (which stores its weights under 'model.').
+            if any(k.startswith('hand_ae.') for k in sd):
+                load_pl_ckpt(hand_ae, sd, prefix='hand_ae.')
+            else:
+                hand_ae_ckpt = cfg.hand_ae.get('pretrained_weight', None)
+                if hand_ae_ckpt is None:
+                    raise ValueError(
+                        f"No 'hand_ae.' keys in {cfg.ckpt_path} and hand_ae.pretrained_weight "
+                        "is unset, so the hand VAE would stay randomly initialized.")
+                print(f"No 'hand_ae.' keys in ckpt; loading hand_ae from {hand_ae_ckpt}")
+                hand_sd = torch.load(hand_ae_ckpt, map_location='cpu', weights_only=False)['state_dict']
+                load_pl_ckpt(hand_ae, hand_sd, prefix='model.')
+            known_prefixes = ('grid_ae.', 'model.', 'hand_ae.')
+            unused_keys = [k for k in sd.keys() if not k.startswith(known_prefixes)]
             print(f'Unused keys in ckpt: {unused_keys}')
 
         pl_model = trainer_module(grid_ae=gridae, model=model, diffusion=diffusion, hand_ae=hand_ae, cfg=cfg)

@@ -128,3 +128,72 @@ class GRIDAEResidualv2(GRIDAEAbstract):
                                      N=cfg.kernel_size,
                                      condition_dim=[cfg.obj_feat_dim] + cfg.obj_h_dims[::-1],
                                      norm=norm, num_groups=num_groups)
+
+
+class GRIDAEResidualv3(GRIDAEAbstract):
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+        # Normalization for the volumetric blocks. Defaults to 'bn' so existing
+        # checkpoints keep loading; set norm: gn in the ae config to drop the
+        # BatchNorm running buffers (see make_norm3d).
+        norm = cfg.get('norm', 'bn')
+        num_groups = cfg.get('num_groups', 8)
+        self.obj_encoder = GridEncoder3Dv2(in_dim=cfg.obj_in_dim,
+                                         h_dims=cfg.obj_h_dims,
+                                         res_expansion=cfg.obj_res_expansion,
+                                         n_res_layers=cfg.obj_n_res_layers,
+                                         feat_dim=cfg.obj_feat_dim,
+                                         N=cfg.kernel_size,
+                                         condition_dim=None,
+                                         norm=norm, num_groups=num_groups)
+        self.encoder = GridEncoder3Dv2(in_dim=cfg.in_dim,
+                                     h_dims=cfg.h_dims,
+                                     res_expansion=cfg.res_expansion,
+                                     n_res_layers=cfg.n_res_layers,
+                                     feat_dim=cfg.feat_dim*2,
+                                     N=cfg.kernel_size,
+                                     condition_dim=cfg.obj_h_dims + [cfg.obj_feat_dim],
+                                     norm=norm, num_groups=num_groups)
+        # pass continuous latent vector through discretization bottleneck
+        # decode the discrete latent representation
+        # self.obj_decoder = Decoder(h_dims[-1], h_dims[::-1], obj_in_dim, obj_n_res_layers, obj_res_h_dim, condition=True, final_layer=False)
+        self.decoder = GridDecoder3Dv2(latent_dim=cfg.feat_dim,
+                                     h_dims=cfg.h_dims[::-1],
+                                     res_expansion=cfg.res_expansion,
+                                     n_res_layers=cfg.n_res_layers,
+                                     out_dim=cfg.out_dim,
+                                     N=cfg.kernel_size,
+                                     condition_dim=[cfg.obj_feat_dim] + cfg.obj_h_dims[::-1],
+                                     norm=norm, num_groups=num_groups)
+        n_grid = cfg.kernel_size**3
+        expand_ratio = n_grid / cfg.obj_feat_dim
+        if expand_ratio > 2:
+            ## Two layers for smoother expansion
+            self.obj_decoder=nn.Sequential(
+                nn.Linear(cfg.obj_feat_dim, cfg.obj_feat_dim*2),
+                nn.LayerNorm(cfg.obj_feat_dim*2),
+                nn.LeakyReLU(0.2),
+                nn.Linear(cfg.obj_feat_dim*2, n_grid)
+            )
+        else:
+            self.obj_decoder=nn.Linear(cfg.obj_feat_dim, n_grid)
+
+    def decode_object(self, obj_feat):
+        obj_decoded = self.obj_decoder(obj_feat)
+        obj_decoded = obj_decoded.view(-1, 1, self.cfg.kernel_size, self.cfg.kernel_size, self.cfg.kernel_size)
+        return obj_decoded
+
+    def forward(self, x, obj_msdf, sample_posterior=True):
+        posterior, obj_feat, obj_cond = self.encode(x, obj_msdf)
+
+        if sample_posterior:
+            z = posterior.sample()
+        else:
+            z = posterior.mode()
+        ## Adding skip connections for object decoder
+        # dec_obj_cond = self.obj_decoder(obj_feat, cond=enc_obj_cond[::-1])
+
+        x_hat = self.decode(z, obj_cond=obj_cond)
+        obj_msdf_hat = self.decode_object(obj_feat)
+        return x_hat, posterior, obj_feat, obj_msdf_hat

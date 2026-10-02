@@ -74,7 +74,7 @@ class LGCDiffTrainer(L.LightningModule):
         self.normalized_grid_coords = get_grid(self.cfg.msdf.kernel_size)
         self.grid_coords = self.normalized_grid_coords * self.cfg.msdf.scale  # (K^3, 3)
         self.msdf_scale = self.cfg.msdf.scale
-        self.pool = Pool(processes=min(self.cfg.test.batch_size, 16))
+        self.pool = None # Pool(processes=min(self.cfg.test.batch_size, 16))
 
     def transfer_batch_to_device(self, batch, device, dataloader_idx):
         batch = super().transfer_batch_to_device(batch, device, dataloader_idx)
@@ -630,6 +630,7 @@ class LGCDiffTrainer(L.LightningModule):
             
         result = calculate_metrics(param_list, metrics=self.cfg.test.criteria, pool=self.pool, reduction='none')
 
+        self.all_results.append(result)
         self.cache_results[obj_name] = {
             "hand_verts": handV,
             "hand_joints": handJ,
@@ -637,12 +638,16 @@ class LGCDiffTrainer(L.LightningModule):
         print('saved to cache_results')
         self.sample_joints.append(handJ)
 
-        # Log raw per-sample metrics to wandb
-        if not self.debug:
+        # Log raw per-sample metrics to wandb. calculate_metrics keeps a few keys as
+        # variable-length per-vertex arrays (see eval_fns.calculate_metrics), which
+        # cannot be cast to a scalar, so only log the ones that are scalar per sample.
+        scalar_result = {k: v for k, v in result.items()
+                         if k not in ("Penetration Depth Raw", "Penetration Depth Vert IDs")}
+        if not self.debug and scalar_result:
             # Option 1: Log each sample as individual rows (creates distributions in wandb)
-            for i in range(len(next(iter(result.values())))):
+            for i in range(len(next(iter(scalar_result.values())))):
                 sample_metrics = {f"sample/{metric_name}": float(metric_values[i])
-                                 for metric_name, metric_values in result.items()}
+                                 for metric_name, metric_values in scalar_result.items()}
                 wandb.log(sample_metrics, commit=False)
 
             # Option 2 (alternative): Use wandb Table for structured logging
@@ -669,8 +674,10 @@ class LGCDiffTrainer(L.LightningModule):
         backend = self.cfg.get('vis_backend', 'open3d')
         recon_imgs = []
         pred_imgs = []
-        # for vis_idx in range(n_samples):
-        if False:
+        recon_img_grid = None
+        pred_img_grid = None
+        vis_result = self.cfg.test.get('vis_result', True)
+        for vis_idx in range(n_samples) if vis_result else ():
             recon_img, pred_geoms = visualize_recon_hand_w_object(
                 hand_verts=pred_hand_verts[vis_idx].detach().cpu().numpy(),
                 hand_verts_mask=pred_verts_mask[vis_idx].detach().cpu().numpy(),
@@ -689,24 +696,27 @@ class LGCDiffTrainer(L.LightningModule):
                 pred_img = pred_ho.vis_img(idx=vis_idx, h=400, w=400, backend=backend)
                 pred_imgs.append(pred_img)
 
-        # Concatenate all sample images horizontally
-        recon_img_grid = np.concatenate(recon_imgs, axis=0)
-        if not self.debug:
+        # Concatenate all sample images vertically
+        if recon_imgs:
+            recon_img_grid = np.concatenate(recon_imgs, axis=0)
+        if pred_imgs:
             pred_img_grid = np.concatenate(pred_imgs, axis=0)
 
-        if hasattr(self.logger, 'experiment'):
+        if vis_result and hasattr(self.logger, 'experiment'):
             if hasattr(self.logger.experiment, 'add_image'):
                 # TensorBoardLogger
-                global_step = self.current_epoch * len(eval(f'self.trainer.datamodule.test_dataloader()')) + batch_idx
-                self.logger.experiment.add_image(f'test/Surrounding_hands', recon_img_grid, global_step, dataformats='HWC')
+                if recon_img_grid is not None:
+                    global_step = self.current_epoch * len(eval(f'self.trainer.datamodule.test_dataloader()')) + batch_idx
+                    self.logger.experiment.add_image(f'test/Surrounding_hands', recon_img_grid, global_step, dataformats='HWC')
                 # self.logger.experiment.add_image(f'test/Sampled_grasp', pred_img_grid, global_step, dataformats='HWC')
             elif hasattr(self.logger.experiment, 'log') and not self.debug:
-                # WandbLogger - add row to table
+                # WandbLogger - add row to table. In debug mode the predicted grasp is
+                # shown interactively instead of rendered, so pred_img_grid may be None.
                 self.test_images_table.add_data(
                     batch_idx,
                     obj_name,
-                    wandb.Image(recon_img_grid),
-                    wandb.Image(pred_img_grid),
+                    wandb.Image(recon_img_grid) if recon_img_grid is not None else None,
+                    wandb.Image(pred_img_grid) if pred_img_grid is not None else None,
                     float(np.mean(result.get("Simulation Displacement", [0]))),
                     float(np.mean(result.get("Penetration Depth", [0]))),
                     float(np.mean(result.get("Contact Area", [0]))),
@@ -881,10 +891,15 @@ class LGCDiffTrainer(L.LightningModule):
             "Canonical Cluster Size": cluster_size_2.item()
         })
 
-        # Log final metrics and test images table to wandb
+        # Log final metrics and test images table to wandb. The table is only
+        # populated when test.vis_result is on; logging an empty one would replace
+        # the panel with a blank table, so skip it in that case and commit the
+        # metrics directly instead.
         if not self.debug:
-            wandb.log(final_metrics, commit=False)
-            wandb.log({"test/images": self.test_images_table})
+            vis_result = self.cfg.test.get('vis_result', True)
+            wandb.log(final_metrics, commit=not vis_result)
+            if vis_result:
+                wandb.log({"test/images": self.test_images_table})
 
         ## Save the results to study detailed criteria.
         for k, v in self.cache_results.items():

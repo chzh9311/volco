@@ -59,13 +59,18 @@ class LGTrainer(L.LightningModule):
         gt_grid_contact = torch.cat([batch['gridContact'], batch['gridHandCSE']], dim=-1)
         hand_in_mask = batch['handVertMask'].any(dim=1)
 
-        posterior, _, obj_cond = self.model.encode(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
+        posterior, obj_feat, obj_cond = self.model.encode(gt_grid_contact.permute(0, 4, 1, 2, 3), grid_sdf.unsqueeze(1))
         recon_cgrid = self.model.decode(posterior.sample(), obj_cond=obj_cond).permute(0, 2, 3, 4, 1)
+        if hasattr(self.model, 'obj_decoder'):
+            obj_msdf_hat = self.model.decode_object(obj_feat)
+        else:
+            obj_msdf_hat = None
         contact, contact_hat = gt_grid_contact[..., 0], recon_cgrid[..., 0]
         cse, cse_hat = gt_grid_contact[..., 1:], recon_cgrid[..., 1:]
         # self.check_latents(posterior)
         batch_size = grid_sdf.shape[0]
         loss_dict = self.loss_net(x=gt_grid_contact, x_hat=recon_cgrid, posterior=posterior, gt_face_idx=batch['face_idx'],
+                                  obj_msdf=grid_sdf, obj_msdf_hat=obj_msdf_hat,
                                   gt_w=batch['cse_weights'], proc=stage)
 
         if stage == 'val':
@@ -508,7 +513,8 @@ class LGTrainer(L.LightningModule):
                                             / (obj_feat.abs().mean() + 1e-12)).detach()
         return out
 
-    def loss_net(self, x, x_hat, posterior, gt_face_idx, gt_w, proc='train'):
+    def loss_net(self, x, x_hat, posterior, gt_face_idx, gt_w,
+                 obj_msdf, obj_msdf_hat=None, proc='train'):
         """
         Compute the loss for training the GRIDAE
         1. Reconstruction loss between x and x_hat
@@ -533,8 +539,15 @@ class LGTrainer(L.LightningModule):
             f'{proc}/cse_rec_loss': cse_rec_loss.detach(),
             f'{proc}/cse_value_loss': cse_value_loss.detach(),
             f'{proc}/kl_loss': kl_loss.detach(),
-            f'{proc}/total_loss': total_loss,
         }
+        if obj_msdf_hat is not None:
+            obj_msdf_diff = obj_msdf - obj_msdf_hat
+            obj_msdf_loss = F.l1_loss(obj_msdf_diff, torch.zeros_like(obj_msdf_diff))
+            loss_dict[f'{proc}/obj_rec_loss'] = obj_msdf_loss.detach()
+            loss_dict[f'{proc}/total_loss'] = total_loss + self.loss_weights.w_obj_rec * obj_msdf_loss
+        else:
+            loss_dict[f'{proc}/total_loss'] = total_loss
+
         return loss_dict
     
     

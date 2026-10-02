@@ -327,6 +327,65 @@ def geom_to_img_o3d(vis_geoms, w, h, scale=1, concat_axis=1):
     return np.concatenate(result_imgs, axis=concat_axis)
 
 
+def geom_to_video_o3d(panels, out_path, w, h, n_frames=90, fps=30, elev=30.0, scale=0.9):
+    """
+    Render one or more groups of Open3D geometries as a turntable video. Each panel is rendered
+    with the camera looking at the centre of the panel's geometries and orbiting the vertical (z)
+    axis for one full turn; panels are placed side by side.
+
+    panels: list of panels, each a list of o3d geometry objects or dicts with key 'geometry'
+    out_path: output .mp4 path
+    """
+    import imageio
+
+    # A single window is reused for all panels: creating/destroying several O3D windows in a
+    # row segfaults here
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(visible=True, width=w, height=h)
+    opt = vis.get_render_option()
+    opt.background_color = np.array([1.0, 1.0, 1.0])
+    opt.light_on = True
+
+    panel_frames = []
+    for vis_geoms in panels:
+        raw_geoms = [g['geometry'] if isinstance(g, dict) else g for g in vis_geoms]
+        bbox = raw_geoms[0].get_axis_aligned_bounding_box()
+        for g in raw_geoms[1:]:
+            bbox += g.get_axis_aligned_bounding_box()
+        lookat = bbox.get_center()
+
+        vis.clear_geometries()
+        for g in raw_geoms:
+            vis.add_geometry(g)
+        vis.reset_view_point(True)  # refit the view bbox to this panel only (it accumulates otherwise)
+        vis.poll_events()
+        vis.update_renderer()
+
+        frames = []
+        elev_rad = np.radians(elev)
+        for azim_rad in np.linspace(0, 2 * np.pi, n_frames, endpoint=False):
+            front = [np.cos(elev_rad) * np.cos(azim_rad), np.cos(elev_rad) * np.sin(azim_rad), np.sin(elev_rad)]
+            ctr = vis.get_view_control()
+            ctr.set_front(front)
+            ctr.set_up([0.0, 0.0, 1.0])
+            ctr.set_lookat(lookat.tolist())
+            ctr.set_zoom(scale)
+            vis.poll_events()
+            vis.update_renderer()
+            vis.poll_events()
+            vis.update_renderer()
+            img = np.asarray(vis.capture_screen_float_buffer(do_render=True))
+            frames.append((img * 255).clip(0, 255).astype(np.uint8))
+        panel_frames.append(frames)
+    vis.destroy_window()
+
+    os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
+    writer = imageio.get_writer(out_path, fps=fps, codec='libx264', quality=8, macro_block_size=16)
+    for i in range(n_frames):
+        writer.append_data(np.concatenate([frames[i] for frames in panel_frames], axis=1))
+    writer.close()
+
+
 def geom_to_img(vis_geoms, w, h, scale=0.07, half_range=None, concat_axis=1, point_size=1):
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
     import matplotlib
@@ -904,13 +963,13 @@ def visualize_local_grid(msdf, kernel_size, point_idx, obj_mesh):
     )
 
 
-def visualize_grid_contact(contact_pts, pt_contact, grid_scale, obj_mesh, w, h, bbox_alpha=0.2, backend='open3d'):
+def visualize_grid_contact(contact_pts, pt_contact, grid_scale, obj_mesh, w, h, bbox_alpha=0.2, backend='open3d', render=True):
     bboxes = create_bbox_geomtries(contact_pts, grid_scale, pt_contact, alpha=bbox_alpha)
     obj_geom = o3dmesh_from_trimesh(obj_mesh, color=[0.7, 0.7, 0.7])
     # Wrap bboxes with alpha values
     bbox_geoms = [{'geometry': bbox, 'alpha': bbox_alpha} for bbox in bboxes]
     vis_geoms = [obj_geom] + bbox_geoms
-    img = geom_to_img_unified(vis_geoms, w=w, h=h, scale=0.5, backend=backend)
+    img = geom_to_img_unified(vis_geoms, w=w, h=h, scale=0.5, backend=backend) if render else None
     return img, vis_geoms
 
 
@@ -945,7 +1004,7 @@ def create_bbox_geomtries(msdf_center, grid_scale, contact=None, alpha=0.3):
 
 
 def visualize_recon_hand_w_object(hand_verts, hand_verts_mask, hand_faces, obj_mesh, part_ids, msdf_center=None, grid_scale=None, h=500, w=500,
-                                  concat_axis=1, backend='open3d'):
+                                  concat_axis=1, backend='open3d', render=True):
     masked_hand_geometries = extract_masked_mesh_components(
         hand_verts=hand_verts,
         hand_faces=hand_faces,
@@ -958,7 +1017,7 @@ def visualize_recon_hand_w_object(hand_verts, hand_verts_mask, hand_faces, obj_m
     # bbox_geometries = create_bbox_geomtries(msdf_center, grid_scale)
 
     vis_geoms = masked_hand_geometries + [obj_o3d_mesh] # + bbox_geometries
-    img = geom_to_img_unified(vis_geoms, w=w, h=h, scale=0.9, concat_axis=concat_axis, backend=backend)
+    img = geom_to_img_unified(vis_geoms, w=w, h=h, scale=0.9, concat_axis=concat_axis, backend=backend) if render else None
     return img, vis_geoms
 
 

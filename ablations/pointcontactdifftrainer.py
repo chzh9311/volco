@@ -361,6 +361,9 @@ class PointContactDiffTrainer(L.LightningModule):
                        'idx': i} for i in range(handV.shape[0])]
             
         result = calculate_metrics(param_list, metrics=self.cfg.test.criteria, pool=self.pool, reduction='none')
+        # Variable-length per-vertex arrays returned with "Penetration Depth"; not per-sample scalars
+        result.pop("Penetration Depth Raw", None)
+        result.pop("Penetration Depth Vert IDs", None)
         ## MPJPE:
         if self.cfg.test_gt:
             mpjpe = np.linalg.norm(handobject.hand_joints.cpu().numpy() - handJ, axis=-1).mean(axis=1) * 1000  # B,
