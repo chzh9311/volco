@@ -12,9 +12,9 @@ from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
 from tqdm import tqdm
 from copy import deepcopy
 from multiprocessing.pool import Pool
-from pysdf import SDF
 
-from common.msdf.utils.msdf import calculate_contact_mask, calc_local_grid_all_pts_gpu
+from kaolin.ops.mesh import index_vertices_by_faces
+from common.msdf.utils.msdf import calculate_contact_mask, calc_local_grid_all_pts_gpu, signed_dist_to_mesh_gpu
 from common.msdf.simplified_msdf import mesh2msdf
 from common.manopth.manopth.manolayer import ManoLayer
 import open3d as o3d
@@ -107,6 +107,16 @@ class LocalGridDataModule(LightningDataModule):
                     f.create_dataset('grid_sample_idx', shape=(grid_alloc_size, 2), maxshape=(None, 2), dtype='int32',
                                      chunks=(1000, 2))
 
+                    # Full object meshes (canonical frame) on GPU, built on first use per object
+                    obj_meshes_gpu = {}
+                    def obj_mesh_gpu(obj_name):
+                        if obj_name not in obj_meshes_gpu:
+                            obj_info = self.base_dataset.obj_info[obj_name]
+                            verts = torch.as_tensor(np.asarray(obj_info['verts']), dtype=torch.float32, device=device)
+                            faces = torch.as_tensor(np.asarray(obj_info['faces']), dtype=torch.long, device=device)
+                            obj_meshes_gpu[obj_name] = (verts, faces, index_vertices_by_faces(verts[None], faces))
+                        return obj_meshes_gpu[obj_name]
+
                     write_idx_grids = 0  # Tracks position in grid_distance
                     write_idx_samples = 0  # Tracks position in per-sample arrays
                     sample_counter = 0  # Absolute sample index for grid_to_sample_idx
@@ -194,22 +204,21 @@ class LocalGridDataModule(LightningDataModule):
                             M = grid_distance_np.shape[0]
 
                             # Calculate SDF grids for active contact points
-                            # Get transformed object mesh
-                            mesh_dict = self.base_dataset.simp_obj_mesh[obj_names[i]]
-                            obj_verts_transformed = (objR[i].numpy() @ mesh_dict['verts'].T).T + obj_t[i].numpy()
-                            obj_mesh = trimesh.Trimesh(vertices=obj_verts_transformed, faces=mesh_dict['faces'], process=False)
-
-                            # Calculate SDF for grid points of active grids
-                            objSDF = SDF(obj_mesh.vertices, obj_mesh.faces)
-
                             # Get active contact points and create grid points
                             active_contact_points = obj_samples[i][grid_mask_np].numpy()  # (M, 3)
                             grid_points_all = (active_contact_points[:, None, :] +
                                              self.normalized_coords.numpy()[None, :, :] * self.cfg.msdf.scale)  # (M, K^3, 3)
                             grid_points_flat = grid_points_all.reshape(-1, 3)  # (M * K^3, 3)
 
-                            # Calculate SDF values
-                            grid_sdf_flat = - objSDF(grid_points_flat)
+                            # Exact SDF (positive outside) on the full mesh the contact points are sampled
+                            # from. pysdf on the simplified mesh gave distance errors of several cm and
+                            # occasional +-2^64 values. SDF is rigid-invariant, so query in the canonical
+                            # object frame: p_can = R^T (p - t).
+                            grid_points_cano = (grid_points_flat - obj_t[i].numpy()) @ objR[i].numpy()
+                            obj_verts_gpu, obj_faces_gpu, obj_face_verts = obj_mesh_gpu(obj_names[i])
+                            grid_sdf_flat = signed_dist_to_mesh_gpu(
+                                torch.as_tensor(grid_points_cano, dtype=torch.float32, device=device),
+                                obj_verts_gpu, obj_faces_gpu, obj_face_verts).cpu().numpy()
                             grid_sdf_np = grid_sdf_flat.reshape(M, kernel_size, kernel_size, kernel_size, 1)
 
                             # Add to buffers instead of writing immediately

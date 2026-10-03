@@ -7,7 +7,7 @@ import trimesh
 from pysdf import SDF
 from skimage.measure import marching_cubes
 from kaolin.metrics.trianglemesh import point_to_mesh_distance
-from kaolin.ops.mesh import index_vertices_by_faces
+from kaolin.ops.mesh import index_vertices_by_faces, check_sign
 
 def get_grid(kernel_size, device='cpu') -> torch.Tensor:
     """
@@ -574,6 +574,30 @@ def nn_dist_to_mesh_gpu(points, hand_verts, faces):
     distances = torch.sqrt(sq_dist.clamp(min=0))
 
     return distances, face_idx, closest_points
+
+
+def signed_dist_to_mesh_gpu(points, verts, faces, face_verts=None):
+    """
+    GPU-accelerated exact signed distance from points to a watertight mesh using Kaolin.
+    Positive outside, negative inside.
+
+    Args:
+        points: torch.Tensor (N, 3), query points on GPU
+        verts: torch.Tensor (V, 3), mesh vertices on GPU
+        faces: torch.LongTensor (F, 3), face indices on GPU
+        face_verts: optional precomputed index_vertices_by_faces(verts[None], faces), (1, F, 3, 3)
+
+    Returns:
+        sdf: torch.Tensor (N,)
+    """
+    points = points.float()
+    verts = verts.float()
+    if face_verts is None:
+        face_verts = index_vertices_by_faces(verts.unsqueeze(0), faces)  # (1, F, 3, 3)
+    sq_dist, _, _ = point_to_mesh_distance(points.unsqueeze(0), face_verts)  # (1, N)
+    inside = check_sign(verts.unsqueeze(0), faces, points.unsqueeze(0))  # (1, N) bool, needs watertight mesh
+    dist = torch.sqrt(sq_dist.clamp(min=0))
+    return torch.where(inside, -dist, dist).squeeze(0)
 
 
 def calc_local_grid_all_pts_gpu(contact_points, normalized_coords, hand_verts, faces, kernel_size, grid_scale,

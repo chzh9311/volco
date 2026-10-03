@@ -394,7 +394,8 @@ class GraspDiffTrainer(LGCDiffTrainer):
                             dist2contact_fn=self.grid_dist_to_contact, recon_hand_verts=recon_hand_verts, recon_verts_mask=recon_verts_mask,
                             n_iter=self.cfg.pose_optimizer.n_opt_iter, lr=self.cfg.pose_optimizer.opt_lr,
                             grid_scale=self.cfg.msdf.scale, w_repulsive=self.cfg.pose_optimizer.w_repulsive,
-                            w_reg_loss=self.cfg.pose_optimizer.w_regularization, init_pose=recon_params)
+                            w_reg_loss=self.cfg.pose_optimizer.w_regularization#, init_pose=recon_params
+                            )
                 mano_trans, global_pose, mano_pose, mano_shape = params
 
                 ## Do NMS: nms_mask[b, i] = True iff contact[b, i] >= contact[b, j] for all neighbours j
