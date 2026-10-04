@@ -1,5 +1,0 @@
-num_grids: 128
-kernel_size: 16
-scale: 0.01
-
-contact_method: 2  # Method for sdf_to_contact transformation
