@@ -32,10 +32,10 @@ class LGCDiffTrainer(L.LightningModule):
     """
     The Lightning trainer interface to train Local-grid based contact autoencoder.
     """
-    def __init__(self, grid_ae, model, diffusion, cfg, **kwargs):
+    def __init__(self, volume_vae, model, diffusion, cfg, **kwargs):
         super().__init__()
         self.automatic_optimization = cfg.train.optimizer != 'asam'
-        self.grid_ae = grid_ae
+        self.volume_vae = volume_vae
         # if cfg.pose_optimizer.name == 'hand_ae':
         #     self.hand_ae = kwargs.get('hand_ae', None)
         self.model = model
@@ -52,9 +52,9 @@ class LGCDiffTrainer(L.LightningModule):
         ## Load autoencoder pretrained weights and freeze before DDP wrapping
         self.pretrained_keys = []
         if cfg.run_phase == 'train':
-            self._load_pretrained_weights(cfg.ae.get('pretrained_weight', None), target_prefix='grid_ae')
-            self.grid_ae.eval()
-            self.grid_ae.requires_grad_(False)
+            self._load_pretrained_weights(cfg.ae.get('pretrained_weight', None), target_prefix='volume_vae')
+            self.volume_vae.eval()
+            self.volume_vae.requires_grad_(False)
 
         # if cfg.pose_optimizer.name == 'hand_ae':
         #     self._load_pretrained_weights(cfg.hand_ae.get('pretrained_weight', None), target_prefix='hand_ae')
@@ -83,7 +83,7 @@ class LGCDiffTrainer(L.LightningModule):
                 batch[key] = value.float()
         return batch
 
-    def _load_pretrained_weights(self, checkpoint_path, target_prefix='grid_ae'):
+    def _load_pretrained_weights(self, checkpoint_path, target_prefix='volume_vae'):
         """
         Load pretrained weights from a Lightning checkpoint.
         Only loads weights for layers that exist in both the checkpoint and current model.
@@ -91,7 +91,7 @@ class LGCDiffTrainer(L.LightningModule):
         Args:
             checkpoint_path: Path to the Lightning checkpoint file
             target_prefix: Prefix to add to checkpoint keys when loading into current model
-                          (e.g., 'grid_ae' will map 'model.encoder.xxx' to 'grid_ae.encoder.xxx')
+                          (e.g., 'volume_vae' will map 'model.encoder.xxx' to 'volume_vae.encoder.xxx')
         """
         import os
 
@@ -164,16 +164,16 @@ class LGCDiffTrainer(L.LightningModule):
                 param.requires_grad = False
                 frozen_count += 1
 
-        # Set grid_ae BatchNorm layers to eval mode to prevent running stats drift
+        # Set volume_vae BatchNorm layers to eval mode to prevent running stats drift
         bn_count = 0
-        for module in self.grid_ae.modules():
+        for module in self.volume_vae.modules():
             if isinstance(module, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d)):
                 module.eval()
                 # Disable running stats updates during forward pass
                 module.track_running_stats = False
                 bn_count += 1
 
-        print(f"Frozen {frozen_count} pretrained parameters in grid_ae")
+        print(f"Frozen {frozen_count} pretrained parameters in volume_vae")
         print(f"Set {bn_count} BatchNorm layers to eval mode (prevents running stats drift)")
 
     # def on_fit_start(self):
@@ -211,10 +211,10 @@ class LGCDiffTrainer(L.LightningModule):
         # n_ho_dist = handobject.n_ho_dist
 
         obj_msdf_center = handobject.obj_msdf[:, :, self.msdf_k**3:] # B x 3
-        ## First process all grids separately using GRIDAE
+        ## First process all grids separately using VolumeVAE
         flat_lg_contact = rearrange(lg_contact, 'b n k1 k2 k3 c -> b n (k1 k2 k3) c')
         lg_contact = rearrange(lg_contact, 'b n k1 k2 k3 c -> (b n) c k1 k2 k3')
-        posterior, obj_feat, multi_scale_obj_cond = self.grid_ae.encode(lg_contact, obj_msdf)
+        posterior, obj_feat, multi_scale_obj_cond = self.volume_vae.encode(lg_contact, obj_msdf)
         # obj_pc = torch.cat([obj_msdf_center, obj_feat.view(batch_size, n_grids, -1)], dim=-1)
         obj_pc = handobject.obj_msdf
         # z = torch.cat([n_ho_dist.unsqueeze(-1), posterior.sample().view(batch_size, n_grids, -1)], dim=-1) # n_dim + 1
@@ -228,7 +228,7 @@ class LGCDiffTrainer(L.LightningModule):
                 raise ValueError(f"NaN detected in input_data['{key}'] at batch_idx {batch_idx}")
 
         # grid_coords = obj_msdf_center[:, :, None, :] + self.grid_coords.view(-1, 3)[None, None, :, :]  # B x N x K^3 x 3
-        losses, pred_x0 = self.diffusion.training_losses(self.model, input_data, grid_ae=self.grid_ae, ms_obj_cond=multi_scale_obj_cond,
+        losses, pred_x0 = self.diffusion.training_losses(self.model, input_data, volume_vae=self.volume_vae, ms_obj_cond=multi_scale_obj_cond,
                                               hand_cse=self.hand_cse, msdf_k=self.msdf_k, grid_scale=self.msdf_scale,
                                               gt_lg_contact=flat_lg_contact,
                                               adj_pt_indices=batch['adjPointIndices'],
@@ -236,7 +236,7 @@ class LGCDiffTrainer(L.LightningModule):
 
         batch_size, n_grids = pred_x0.shape[:2]
         pred_x0 = pred_x0.reshape(batch_size*n_grids, -1)
-        recon_lg_contact = self.grid_ae.decode(pred_x0, multi_scale_obj_cond)
+        recon_lg_contact = self.volume_vae.decode(pred_x0, multi_scale_obj_cond)
         # recon_lg_contact = recon_lg_contact.view(batch_size, n_grids, -1, self.msdf_k ** 3).permute(0, 1, 3, 2)
         recon_lg_contact = rearrange(recon_lg_contact, '(b n) c k1 k2 k3 -> b (n k1 k2 k3) c', b=batch_size, n=n_grids)
 
@@ -269,12 +269,12 @@ class LGCDiffTrainer(L.LightningModule):
             # Recompute forward pass with perturbed weights for the second step
             lg_contact_2 = rearrange(handobject.ml_contact, 'b n k1 k2 k3 c -> (b n) c k1 k2 k3')
             flat_lg_contact_2 = rearrange(handobject.ml_contact, 'b n k1 k2 k3 c -> b n (k1 k2 k3) c')
-            posterior_2, obj_feat_2, multi_scale_obj_cond_2 = self.grid_ae.encode(lg_contact_2, obj_msdf.detach())
+            posterior_2, obj_feat_2, multi_scale_obj_cond_2 = self.volume_vae.encode(lg_contact_2, obj_msdf.detach())
             obj_pc_2 = torch.cat([obj_msdf_center.detach(), obj_feat_2.view(batch_size, n_grids, -1)], dim=-1)
             z_2 = posterior_2.sample().view(batch_size, n_grids, -1)
             input_data_2 = {'x': z_2, 'obj_pc': obj_pc_2.permute(0, 2, 1)}
 
-            losses2 = self.diffusion.training_losses(self.model, input_data_2, grid_ae=self.grid_ae, ms_obj_cond=multi_scale_obj_cond_2,
+            losses2 = self.diffusion.training_losses(self.model, input_data_2, volume_vae=self.volume_vae, ms_obj_cond=multi_scale_obj_cond_2,
                                                   hand_cse=self.hand_cse, msdf_k=self.msdf_k, grid_scale=self.msdf_scale,
                                                   gt_lg_contact=flat_lg_contact_2,
                                                   adj_pt_indices=batch['adjPointIndices'],
@@ -316,7 +316,7 @@ class LGCDiffTrainer(L.LightningModule):
 
             gt_latent = input_data['x']
 
-            # recon_lg_contact, z_e, obj_feat = self.grid_ae(
+            # recon_lg_contact, z_e, obj_feat = self.volume_vae(
             #     lg_contact, obj_msdf=obj_msdf, sample_posterior=False)
             # recon_lg_contact = recon_lg_contact.permute(0, 2, 3, 4, 1)  # B x N x K x K x K x (1 + cse_dim)
             # recon_lg_contact = recon_lg_contact.view(batch_size, 128, self.msdf_k, self.msdf_k, self.msdf_k, -1)
@@ -438,7 +438,7 @@ class LGCDiffTrainer(L.LightningModule):
     def reconstruct_from_latent(self, latent, multi_scale_obj_cond, obj_msdf_center):
         batch_size, n_grids = latent.shape[:2]
         latent = latent.reshape(batch_size*n_grids, -1)
-        recon_lg_contact = self.grid_ae.decode(latent, multi_scale_obj_cond)
+        recon_lg_contact = self.volume_vae.decode(latent, multi_scale_obj_cond)
         recon_lg_contact = recon_lg_contact.view(batch_size, n_grids, -1, self.msdf_k ** 3).permute(0, 1, 3, 2)
         sample_contact = recon_lg_contact[..., 0] # * grid_contact_mask[:, :, None].float()
         sample_cse = recon_lg_contact[..., 1:]
@@ -529,7 +529,7 @@ class LGCDiffTrainer(L.LightningModule):
 
             obj_msdf = handobject.obj_msdf[:, :, :self.msdf_k**3].view(-1, 1, self.msdf_k, self.msdf_k, self.msdf_k) # N x ...
             obj_msdf_center = handobject.obj_msdf[:, :, self.msdf_k**3:] # N x 3
-            obj_feat, multi_scale_obj_cond = self.grid_ae.encode_object(obj_msdf)
+            obj_feat, multi_scale_obj_cond = self.volume_vae.encode_object(obj_msdf)
             # obj_pc = torch.cat([obj_msdf_center, obj_feat.unsqueeze(0)], dim=-1)
             obj_pc = handobject.obj_msdf
 
@@ -560,10 +560,10 @@ class LGCDiffTrainer(L.LightningModule):
             ## repeat the multi-scale obj cond here
             multi_scale_obj_cond = [cond.repeat(n_samples, *([1] * (cond.ndim - 1))) for cond in multi_scale_obj_cond]
             multi_scale_obj_cond.append(obj_feat.repeat(n_samples, 1))
-            recon_lg_contact = self.grid_ae.decode(latent, multi_scale_obj_cond)
+            recon_lg_contact = self.volume_vae.decode(latent, multi_scale_obj_cond)
             # recon_lg_contact, mu, logvar = self.model(
             #     lg_contact.permute(0, 1, 5, 2, 3, 4), obj_msdf=obj_msdf, msdf_center=obj_msdf_center)
-            # recon_lg_contact, z_e, obj_feat = self.grid_ae(
+            # recon_lg_contact, z_e, obj_feat = self.volume_vae(
             #     lg_contact.view(n_samples*n_pts, self.msdf_k, self.msdf_k, self.msdf_k, -1).permute(0, 4, 1, 2, 3),
             #     obj_msdf=obj_msdf.unsqueeze(1), sample_posterior=False)
             recon_lg_contact = recon_lg_contact.permute(0, 2, 3, 4, 1)  # B x K x K x K x (1 + cse_dim)
@@ -746,7 +746,7 @@ class LGCDiffTrainer(L.LightningModule):
         # Decode latent to contact grid
         flat_latent = latent.reshape(n_samples * n_grids, -1)
         ms_obj_cond = [cond.repeat(n_samples, 1, 1, 1, 1) for cond in multi_scale_obj_cond]
-        recon = self.grid_ae.decode(flat_latent, ms_obj_cond)  # (n_samples*n_grids, C, K, K, K)
+        recon = self.volume_vae.decode(flat_latent, ms_obj_cond)  # (n_samples*n_grids, C, K, K, K)
         recon = recon.view(n_samples, n_grids, -1, K ** 3).permute(0, 1, 3, 2)  # (B, N, K^3, C)
 
         grid_contact = recon[..., 0].reshape(n_samples, -1)  # (B, N*K^3)
@@ -771,7 +771,7 @@ class LGCDiffTrainer(L.LightningModule):
             proj_cse.reshape(n_samples, n_grids, K ** 3, self.cse_dim)
         ], dim=-1)  # (B, N, K^3, C)
         proj_lg = rearrange(proj_lg, 'b n (k1 k2 k3) c -> (b n) c k1 k2 k3', k1=K, k2=K, k3=K)
-        posterior, _, _ = self.grid_ae.encode(proj_lg, obj_msdf.repeat(n_samples, 1, 1, 1, 1))
+        posterior, _, _ = self.volume_vae.encode(proj_lg, obj_msdf.repeat(n_samples, 1, 1, 1, 1))
         proj_latent = posterior.sample().view(n_samples, n_grids, -1)
         return proj_latent
 

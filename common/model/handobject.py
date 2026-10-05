@@ -36,7 +36,7 @@ class HandObject:
         self.closed_hand_faces = np.load("data/misc/closed_mano_r_faces.npy")
         self.hand_cse = torch.load(cfg.get('hand_cse_path', 'data/misc/hand_cse.ckpt'), weights_only=True)['state_dict']['embedding_tensor'].detach().to(self.device)
         self.hand_part_ids = torch.argmax(self.mano_layer.th_weights, dim=-1).detach().cpu().numpy()
-        self.apply_grid_mask = apply_grid_mask ## Only apply this mask when training the old version of GRIDAE for backward compatibility.
+        self.apply_grid_mask = apply_grid_mask ## Only apply this mask when training the old version of VolumeVAE for backward compatibility.
         self.hand_verts = None
         self.hand_pose = None
         self.hand_root_rot = None

@@ -7,141 +7,13 @@ from common.model.layers import ResidualStack, Conv3D, MaxPool3D, ResnetBlockFC,
 from common.utils.pointnet2_utils import PointNetSetAbstraction, PointNetFeaturePropagation
 
 
-# class Encoder(nn.Module):
-#     """
-#     This is the q_theta (z|x) network. Given a data sample x q_theta 
-#     maps to the latent space x -> z.
-
-#     For a VQ VAE, q_theta outputs parameters of a categorical distribution.
-
-#     Inputs:
-#     - in_dim : the input dimension
-#     - h_dim : the hidden layer dimension
-#     - res_h_dim : the hidden dimension of the residual block
-#     - n_res_layers : number of layers to stack
-
-#     """
-
-#     def __init__(self, in_dim, h_dims, n_res_layers, res_h_dim, condition=True):
-#         super(Encoder, self).__init__()
-#         self.condition = condition
-#         self.conv0 = Conv3D(in_dim, h_dims[0], kernel_size=1, stride=1, padding=0)
-#         ## Double the channels if conditional input is provided
-#         self.conv1 = Conv3D(h_dims[0] * (1+condition), h_dims[1], kernel_size=3, stride=1, padding=1) 
-#         self.pool1 = MaxPool3D(kernel_size=2)
-#         self.conv2 = Conv3D(h_dims[1] * (1+condition), h_dims[2], kernel_size=3, stride=1, padding=1)
-#         self.pool2 = MaxPool3D(kernel_size=2)
-#         self.conv3 = Conv3D(h_dims[2] * (1+condition), h_dims[3], kernel_size=3, stride=1, padding=1)
-#         self.res_stack = ResidualStack(h_dims[3], h_dims[3], res_h_dim, n_res_layers)
-
-        # self.conv_stack = nn.Sequential(
-        #     nn.Conv3d(in_dim, h_dim // 2, kernel_size=kernel,
-        #               stride=stride, padding=1),
-        #     nn.ReLU(),
-        #     nn.MaxPool3d(2),
-        #     nn.Conv3d(h_dim // 2, h_dim, kernel_size=kernel,
-        #               stride=stride, padding=1),
-        #     nn.ReLU(),
-        #     nn.MaxPool3d(2),
-        #     nn.Conv3d(h_dim, h_dim, kernel_size=kernel-1,
-        #               stride=stride-1, padding=1),
-        #     ResidualStack(
-        #         h_dim, h_dim, res_h_dim, n_res_layers)
-
-        # )
-
-    # def forward(self, x, cond=None):
-    #     ## Concatenate the features once for each feature scale
-    #     x0 = self.conv0(x)
-    #     if not self.condition:
-    #         x1 = self.conv1(x0)
-    #         x1 = self.pool1(x1)
-    #         x2 = self.conv2(x1)
-    #         x2 = self.pool2(x2)
-    #         x3 = self.conv3(x2)
-    #     else:
-    #         assert cond is not None, "Conditional features must be provided!"
-    #         x1 = self.conv1(torch.cat([x0, cond[0]], dim=1))
-    #         x1 = self.pool1(x1)
-    #         x2 = self.conv2(torch.cat([x1, cond[1]], dim=1))
-    #         x2 = self.pool2(x2)
-    #         x3 = self.conv3(torch.cat([x2, cond[2]], dim=1))
-    #     x3 = self.res_stack(x3)
-    #     return x3, [x0, x1, x2]
-
-
-class GridEncoder3D(nn.Module):
-    """
-    Encode the object local grid into multi-scale latent features
-    """
-    def __init__(self, in_dim, h_dims, res_h_dim, n_res_layers, feat_dim, N, condition_dim=None):
-        super(GridEncoder3D, self).__init__()
-        self.num_layers = len(h_dims)
-        self.conv_layers = nn.ModuleList()
-        self.actvn = nn.ModuleList()
-        self.bn = nn.ModuleList()
-        self.downsample_layers = nn.ModuleList()
-
-        if condition_dim is None:
-            condition_dim = [0] * (self.num_layers + 1)
-        for i in range(self.num_layers):
-            in_channels = in_dim if i == 0 else h_dims[i-1]
-            # First conv: 1x1 to change channels
-            conv1 = Conv3D(in_channels, h_dims[i], kernel_size=1, stride=1, padding=0)
-            # Second conv: 3x3 to process features
-            conv2 = Conv3D(h_dims[i] + condition_dim[i], h_dims[i], kernel_size=3, stride=1, padding=1)
-            self.conv_layers.append(nn.ModuleList([conv1, conv2]))
-            self.actvn.append(nn.ModuleList([nn.ReLU(), nn.ReLU()]))
-            self.bn.append(nn.ModuleList([nn.BatchNorm3d(h_dims[i]), nn.BatchNorm3d(h_dims[i])]))
-
-            # Pool layer (not used after the last layer group)
-            if i < self.num_layers - 1:
-                # self.pool_layers.append(MaxPool3D(kernel_size=2))
-                ## Use strided conv for downsampling to restore the maximum information
-                self.downsample_layers.append(Conv3D(h_dims[i], h_dims[i], kernel_size=3, stride=2, padding=1))
-        
-        self.final_residual = ResidualStack(h_dims[-1], res_h_dim=res_h_dim, n_res_layers=n_res_layers)
-        self.final_layer = nn.Sequential(
-            # ResnetBlockFC(h_dims[-1]*(N//2**(self.num_layers-1))**3, feat_dim, 2 * feat_dim),
-            nn.Linear(h_dims[-1]*(N//2**(self.num_layers-1))**3 + condition_dim[-1], 2 * feat_dim),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(2 * feat_dim, feat_dim)
-        )
-
-    def forward(self, x, cond=None):
-        ## Enable conditional concatenation if cond is provided
-        outputs = []
-
-        for i in range(self.num_layers):
-            x = self.conv_layers[i][0](x)
-            x = self.actvn[i][0](self.bn[i][0](x))
-            if cond is not None:
-                x = self.conv_layers[i][1](torch.cat([x, cond[i]], dim=1))
-            else:
-                x = self.conv_layers[i][1](x)
-            x = self.actvn[i][1](self.bn[i][1](x))
-            outputs.append(x)
-
-            # Apply pooling if not the last layer
-            if i < self.num_layers - 1:
-                x = self.downsample_layers[i](x)
-        
-        x = self.final_residual(x)
-        x = x.view(x.size(0), -1)  # Flatten the spatial dimensions
-        if cond is not None:
-            x = torch.cat([x, cond[-1]], dim=1)
-        x = self.final_layer(x)
-
-        return x, outputs
-
-
-class GridEncoder3Dv2(nn.Module):
+class VolumeEncoder3D(nn.Module):
     """
     Encode the object local grid into multi-scale latent features
     """
     def __init__(self, in_dim, h_dims, res_expansion, n_res_layers, feat_dim, N, condition_dim=None,
                  norm='bn', num_groups=8):
-        super(GridEncoder3Dv2, self).__init__()
+        super(VolumeEncoder3D, self).__init__()
         self.num_layers = len(h_dims)
         self.conv_layers = nn.ModuleList()
         self.downsample_layers = nn.ModuleList()
@@ -208,9 +80,9 @@ class GridEncoder3Dv2(nn.Module):
 
 
 
-class GridConv3DEnc(nn.Module):
+class VolumeConv3DEnc(nn.Module):
     def __init__(self, cfg):
-        super(GridConv3DEnc, self).__init__()
+        super(VolumeConv3DEnc, self).__init__()
         self.cfg = cfg
         self.conv1 = Conv3D(cfg.in_dim, cfg.h_dims[0], kernel_size=3, stride=1, padding=1)
         self.conv2 = Conv3D(cfg.h_dims[0], cfg.h_dims[1], kernel_size=3, stride=2, padding=1)

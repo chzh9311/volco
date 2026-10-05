@@ -31,8 +31,8 @@ class GraspDiffTrainer(LGCDiffTrainer):
     """
     The Lightning trainer interface to train Local-grid based contact autoencoder.
     """
-    def __init__(self, grid_ae, hand_ae, model, diffusion, cfg):
-        super(GraspDiffTrainer, self).__init__(grid_ae=grid_ae, model=model, diffusion=diffusion, cfg=cfg)
+    def __init__(self, volume_vae, hand_ae, model, diffusion, cfg):
+        super(GraspDiffTrainer, self).__init__(volume_vae=volume_vae, model=model, diffusion=diffusion, cfg=cfg)
         self.hand_ae = hand_ae
         if cfg.run_phase == 'train':
             self._load_pretrained_weights(cfg.hand_ae.get('pretrained_weight', None), target_prefix='hand_ae')
@@ -87,12 +87,12 @@ class GraspDiffTrainer(LGCDiffTrainer):
 
         proj_lg = torch.cat([proj_lg_contact.unsqueeze(-1), proj_lg_cse], dim=-1) # (B, N*K^3, 1+cse_dim)
         proj_lg = rearrange(proj_lg, 'b (n k1 k2 k3) c -> (b n) c k1 k2 k3', k1=k, k2=k, k3=k)
-        posterior, _, _ = self.grid_ae.encode(proj_lg, grid_msdf)
+        posterior, _, _ = self.volume_vae.encode(proj_lg, grid_msdf)
         local_latent = posterior.sample().view(batch_size, n_grids, -1) # (B, N, latent_dim)
         return local_latent
     
     # def on_fit_start(self):
-    #     # Set grid_ae BatchNorm layers to eval mode to prevent running stats drift
+    #     # Set volume_vae BatchNorm layers to eval mode to prevent running stats drift
     #     super(GraspDiffTrainer, self).on_fit_start()
     #     bn_count = 0
     #     for module in self.hand_ae.modules():
@@ -120,10 +120,10 @@ class GraspDiffTrainer(LGCDiffTrainer):
         # n_ho_dist = handobject.n_ho_dist
 
         obj_msdf_center = handobject.obj_msdf[:, :, self.msdf_k**3:] # B x 3
-        ## First process all grids separately using GRIDAE
+        ## First process all grids separately using VolumeVAE
         flat_lg_contact = rearrange(lg_contact, 'b n k1 k2 k3 c -> b n (k1 k2 k3) c')
         lg_contact = rearrange(lg_contact, 'b n k1 k2 k3 c -> (b n) c k1 k2 k3')
-        posterior, obj_feat, multi_scale_obj_cond = self.grid_ae.encode(lg_contact, obj_msdf)
+        posterior, obj_feat, multi_scale_obj_cond = self.volume_vae.encode(lg_contact, obj_msdf)
         # z = torch.cat([n_ho_dist.unsqueeze(-1), posterior.sample().view(batch_size, n_grids, -1)], dim=-1) # n_dim + 1
         gt_contact_latent = posterior.sample().view(batch_size, n_grids, -1) # n_dim
         # obj_pc = torch.cat([obj_msdf_center, obj_feat.view(batch_size, n_grids, -1)], dim=-1)
@@ -156,7 +156,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
         ## For stable loss
         if self.loss_weights.get('stable_loss', 0) > 0:
             pred_grid_latent = rearrange(pred_grid_latent, 'b (n l) -> (b n) l', n=n_grids)
-            recon_grid_contact = self.grid_ae.decode(pred_grid_latent, multi_scale_obj_cond)  # (B*N) x c x k x k x k
+            recon_grid_contact = self.volume_vae.decode(pred_grid_latent, multi_scale_obj_cond)  # (B*N) x c x k x k x k
             lgc = rearrange(recon_grid_contact[:, 0], '(b n) k1 k2 k3 -> b (n k1 k2 k3)', b=batch_size, n=n_grids)
             lgc = torch.where(lgc < 0.05, torch.zeros_like(lgc), lgc)
             sdf_vals = handobject.obj_msdf[:, :, :self.msdf_k**3]        # (B, N, K^3)
@@ -287,7 +287,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
 
         obj_msdf_grid = handobject.obj_msdf[:, :, :self.msdf_k**3].view(-1, 1, self.msdf_k, self.msdf_k, self.msdf_k) # (B*N) x 1 x k x k x k
         obj_msdf_center = handobject.obj_msdf[:, :, self.msdf_k**3:] # B x N x 3
-        obj_feat, multi_scale_obj_cond = self.grid_ae.encode_object(obj_msdf_grid)
+        obj_feat, multi_scale_obj_cond = self.volume_vae.encode_object(obj_msdf_grid)
         # obj_pc = torch.cat([obj_msdf_center, obj_feat.unsqueeze(0)], dim=-1)
         obj_pc = handobject.obj_msdf
 
@@ -331,7 +331,7 @@ class GraspDiffTrainer(LGCDiffTrainer):
         ## repeat the multi-scale obj cond here
         multi_scale_obj_cond = [cond.repeat(n_samples, 1, 1, 1, 1) for cond in multi_scale_obj_cond]
         multi_scale_obj_cond.append(obj_feat.repeat(n_samples, 1))
-        recon_lg_contact = self.grid_ae.decode(grid_latent, multi_scale_obj_cond)
+        recon_lg_contact = self.volume_vae.decode(grid_latent, multi_scale_obj_cond)
         recon_lg_contact = recon_lg_contact.permute(0, 2, 3, 4, 1)  # B x K x K x K x (1 + cse_dim)
         recon_lg_contact = recon_lg_contact.view(n_samples, n_grids, self.msdf_k, self.msdf_k, self.msdf_k, -1)
         recon_lg_contact[..., 0][recon_lg_contact[..., 0] < self.cfg.pose_optimizer.contact_th] = 0  ## maskout low contact prob

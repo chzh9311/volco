@@ -1,9 +1,9 @@
 defaults:
   - msdf: "64_4"
   - data: grab_local_grid
-  # - ae: gridae_128latent_v2_gn
-  # - ae: gridae_128latent_v3_gn
-  - ae: gridae_64latent_v3_gn
+  # - ae: volume_vae_128latent_v2_gn
+  # - ae: volume_vae_128latent_v3_gn
+  - ae: volume_vae_64latent_v3_gn
   - _self_
 
 training_stage: "ae"
@@ -38,7 +38,7 @@ test:
   vis_every_n_batches: 1
 
 checkpoint:
-  dirpath: logs/checkpoints/gridae/gn/${ae.feat_dim}latent/
+  dirpath: logs/checkpoints/volume_vae/gn/${ae.feat_dim}latent/
   filename: best
   save_top_k: 3
 

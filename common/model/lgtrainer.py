@@ -506,7 +506,7 @@ class LGTrainer(L.LightningModule):
         z_shuffled = self.model.decode(z[perm], obj_cond=obj_cond)
         out[f'{stage}/latent_sensitivity'] = ((base - z_shuffled).norm() / base_norm).detach()
 
-        # obj_cond[-1] is the global object feature vector (see GRIDAEAbstract.encode).
+        # obj_cond[-1] is the global object feature vector (see VolumeVAEAbstract.encode).
         obj_feat = obj_cond[-1]
         if obj_feat.dim() == 2:
             out[f'{stage}/obj_feat_cov'] = (obj_feat.std(dim=0).mean()
@@ -516,7 +516,7 @@ class LGTrainer(L.LightningModule):
     def loss_net(self, x, x_hat, posterior, gt_face_idx, gt_w,
                  obj_msdf, obj_msdf_hat=None, proc='train'):
         """
-        Compute the loss for training the GRIDAE
+        Compute the loss for training the VolumeVAE
         1. Reconstruction loss between x and x_hat
         2. Regularization loss on z_e (KL-divergence)
         """

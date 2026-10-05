@@ -183,7 +183,7 @@ class MLCTrainer(L.LightningModule):
             obj_msdf_center = handobject.obj_msdf[:, :, self.msdf_k**3:] # B x 3
             # recon_lg_contact, mu, logvar = self.model(
             #     lg_contact.permute(0, 1, 5, 2, 3, 4), obj_msdf=obj_msdf, msdf_center=obj_msdf_center)
-            recon_lg_contact, z_e, obj_feat = self.model.grid_ae(
+            recon_lg_contact, z_e, obj_feat = self.model.volume_vae(
                 lg_contact.view(batch_size*n_pts, self.msdf_k, self.msdf_k, self.msdf_k, -1).permute(0, 4, 1, 2, 3),
                 obj_msdf=obj_msdf.unsqueeze(1), sample_posterior=False)
             recon_lg_contact = recon_lg_contact.permute(0, 2, 3, 4, 1)  # B x N x K x K x K x (1 + cse_dim)
@@ -407,7 +407,7 @@ class MLCTrainer(L.LightningModule):
 
     def loss_net(self, pred_lgc, gt_lgc, mu, logvar, pred_hand_verts, gt_hand_verts, contact_verts_mask):
         """
-        Compute the loss for training the GRIDAE
+        Compute the loss for training the VolumeVAE
         1. Reconstruction loss between x and x_hat
         2. KL-divergence loss on z_e with dynamic weighting (annealing)
         """

@@ -1228,9 +1228,9 @@ class GaussianDiffusion(nn.Module):
         ## Reconstruction Loss
         # batch_size, n_grids = model_output.shape[:2]
         # latent = model_output.reshape(batch_size*n_grids, -1)
-        # grid_ae = kwargs['grid_ae']
+        # volume_vae = kwargs['volume_vae']
         # ms_obj_cond = kwargs['ms_obj_cond']
-        # recon_lg_contact = grid_ae.decode(latent, ms_obj_cond)
+        # recon_lg_contact = volume_vae.decode(latent, ms_obj_cond)
 
         # msdf_k = kwargs['msdf_k']
         # recon_lg_contact = recon_lg_contact.view(batch_size, n_grids, -1, msdf_k ** 3).permute(0, 1, 3, 2)

@@ -2,12 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .encoder import GridEncoder3D, GridEncoder3Dv2
-from .decoder import GridDecoder3D, GridDecoder3Dv2
+from .encoder import VolumeEncoder3D
+from .decoder import VolumeDecoder3D
 from common.msdf.utils.msdf import get_grid
 from common.model.layers import DiagonalGaussianDistribution
 
-class GRIDAEAbstract(nn.Module):
+class VolumeVAEAbstract(nn.Module):
     """
     MSDF-based 3D contact VQVAE of one local 3D patch
     The input contact representation is expected to be kernel_size^3 x (1 + 16); 1 refers to contact likelihood, 16 refers to Hand CSE.
@@ -19,7 +19,7 @@ class GRIDAEAbstract(nn.Module):
     We can try add this as part of the input to the encoder & decoder.
     """
     def __init__(self, **kwargs):
-        super(GRIDAEAbstract, self).__init__()
+        super(VolumeVAEAbstract, self).__init__()
     
     def encode(self, x, obj_msdf):
         obj_feat, obj_cond = self.obj_encoder(obj_msdf)
@@ -57,42 +57,7 @@ class GRIDAEAbstract(nn.Module):
         return x_hat
     
 
-class GRIDAEResidual(GRIDAEAbstract):
-    def __init__(self, cfg):
-        super(GRIDAEAbstract, self).__init__()
-        self.cfg = cfg
-        self.obj_encoder = GridEncoder3D(in_dim=cfg.obj_in_dim,
-                                         h_dims=cfg.obj_h_dims,
-                                         res_h_dim=cfg.obj_res_h_dim,
-                                         n_res_layers=cfg.obj_n_res_layers,
-                                         feat_dim=cfg.obj_feat_dim,
-                                         N=cfg.kernel_size,
-                                         condition_dim=None)
-        self.encoder = GridEncoder3D(in_dim=cfg.in_dim,
-                                     h_dims=cfg.h_dims,
-                                     res_h_dim=cfg.res_h_dim,
-                                     n_res_layers=cfg.n_res_layers,
-                                     feat_dim=cfg.feat_dim*2,
-                                     N=cfg.kernel_size,
-                                     condition_dim=cfg.obj_h_dims + [cfg.obj_feat_dim])
-        # pass continuous latent vector through discretization bottleneck
-        # decode the discrete latent representation
-        # self.obj_decoder = Decoder(h_dims[-1], h_dims[::-1], obj_in_dim, obj_n_res_layers, obj_res_h_dim, condition=True, final_layer=False)
-        self.decoder = GridDecoder3D(latent_dim=cfg.feat_dim,
-                                     h_dims=cfg.h_dims[::-1],
-                                     res_h_dim=cfg.res_h_dim,
-                                     n_res_layers=cfg.n_res_layers,
-                                     out_dim=cfg.out_dim,
-                                     N=cfg.kernel_size,
-                                     condition_dim=[cfg.obj_feat_dim] + cfg.obj_h_dims[::-1])
-        # if save_img_embedding_map:
-        #     self.img_to_embedding_map = {i: [] for i in range(n_embeddings)}
-        # else:
-        #     self.img_to_embedding_map = None
-        self.grid_coords = get_grid(cfg.msdf.kernel_size) * cfg.msdf.scale
-
-
-class GRIDAEResidualv2(GRIDAEAbstract):
+class VolumeVAEResidual(VolumeVAEAbstract):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
@@ -101,7 +66,7 @@ class GRIDAEResidualv2(GRIDAEAbstract):
         # BatchNorm running buffers (see make_norm3d).
         norm = cfg.get('norm', 'bn')
         num_groups = cfg.get('num_groups', 8)
-        self.obj_encoder = GridEncoder3Dv2(in_dim=cfg.obj_in_dim,
+        self.obj_encoder = VolumeEncoder3D(in_dim=cfg.obj_in_dim,
                                          h_dims=cfg.obj_h_dims,
                                          res_expansion=cfg.obj_res_expansion,
                                          n_res_layers=cfg.obj_n_res_layers,
@@ -109,7 +74,7 @@ class GRIDAEResidualv2(GRIDAEAbstract):
                                          N=cfg.kernel_size,
                                          condition_dim=None,
                                          norm=norm, num_groups=num_groups)
-        self.encoder = GridEncoder3Dv2(in_dim=cfg.in_dim,
+        self.encoder = VolumeEncoder3D(in_dim=cfg.in_dim,
                                      h_dims=cfg.h_dims,
                                      res_expansion=cfg.res_expansion,
                                      n_res_layers=cfg.n_res_layers,
@@ -120,7 +85,7 @@ class GRIDAEResidualv2(GRIDAEAbstract):
         # pass continuous latent vector through discretization bottleneck
         # decode the discrete latent representation
         # self.obj_decoder = Decoder(h_dims[-1], h_dims[::-1], obj_in_dim, obj_n_res_layers, obj_res_h_dim, condition=True, final_layer=False)
-        self.decoder = GridDecoder3Dv2(latent_dim=cfg.feat_dim,
+        self.decoder = VolumeDecoder3D(latent_dim=cfg.feat_dim,
                                      h_dims=cfg.h_dims[::-1],
                                      res_expansion=cfg.res_expansion,
                                      n_res_layers=cfg.n_res_layers,
@@ -128,72 +93,3 @@ class GRIDAEResidualv2(GRIDAEAbstract):
                                      N=cfg.kernel_size,
                                      condition_dim=[cfg.obj_feat_dim] + cfg.obj_h_dims[::-1],
                                      norm=norm, num_groups=num_groups)
-
-
-class GRIDAEResidualv3(GRIDAEAbstract):
-    def __init__(self, cfg):
-        super().__init__()
-        self.cfg = cfg
-        # Normalization for the volumetric blocks. Defaults to 'bn' so existing
-        # checkpoints keep loading; set norm: gn in the ae config to drop the
-        # BatchNorm running buffers (see make_norm3d).
-        norm = cfg.get('norm', 'bn')
-        num_groups = cfg.get('num_groups', 8)
-        self.obj_encoder = GridEncoder3Dv2(in_dim=cfg.obj_in_dim,
-                                         h_dims=cfg.obj_h_dims,
-                                         res_expansion=cfg.obj_res_expansion,
-                                         n_res_layers=cfg.obj_n_res_layers,
-                                         feat_dim=cfg.obj_feat_dim,
-                                         N=cfg.kernel_size,
-                                         condition_dim=None,
-                                         norm=norm, num_groups=num_groups)
-        self.encoder = GridEncoder3Dv2(in_dim=cfg.in_dim,
-                                     h_dims=cfg.h_dims,
-                                     res_expansion=cfg.res_expansion,
-                                     n_res_layers=cfg.n_res_layers,
-                                     feat_dim=cfg.feat_dim*2,
-                                     N=cfg.kernel_size,
-                                     condition_dim=cfg.obj_h_dims + [cfg.obj_feat_dim],
-                                     norm=norm, num_groups=num_groups)
-        # pass continuous latent vector through discretization bottleneck
-        # decode the discrete latent representation
-        # self.obj_decoder = Decoder(h_dims[-1], h_dims[::-1], obj_in_dim, obj_n_res_layers, obj_res_h_dim, condition=True, final_layer=False)
-        self.decoder = GridDecoder3Dv2(latent_dim=cfg.feat_dim,
-                                     h_dims=cfg.h_dims[::-1],
-                                     res_expansion=cfg.res_expansion,
-                                     n_res_layers=cfg.n_res_layers,
-                                     out_dim=cfg.out_dim,
-                                     N=cfg.kernel_size,
-                                     condition_dim=[cfg.obj_feat_dim] + cfg.obj_h_dims[::-1],
-                                     norm=norm, num_groups=num_groups)
-        n_grid = cfg.kernel_size**3
-        expand_ratio = n_grid / cfg.obj_feat_dim
-        if expand_ratio > 2:
-            ## Two layers for smoother expansion
-            self.obj_decoder=nn.Sequential(
-                nn.Linear(cfg.obj_feat_dim, cfg.obj_feat_dim*2),
-                nn.LayerNorm(cfg.obj_feat_dim*2),
-                nn.LeakyReLU(0.2),
-                nn.Linear(cfg.obj_feat_dim*2, n_grid)
-            )
-        else:
-            self.obj_decoder=nn.Linear(cfg.obj_feat_dim, n_grid)
-
-    def decode_object(self, obj_feat):
-        obj_decoded = self.obj_decoder(obj_feat)
-        obj_decoded = obj_decoded.view(-1, 1, self.cfg.kernel_size, self.cfg.kernel_size, self.cfg.kernel_size)
-        return obj_decoded
-
-    def forward(self, x, obj_msdf, sample_posterior=True):
-        posterior, obj_feat, obj_cond = self.encode(x, obj_msdf)
-
-        if sample_posterior:
-            z = posterior.sample()
-        else:
-            z = posterior.mode()
-        ## Adding skip connections for object decoder
-        # dec_obj_cond = self.obj_decoder(obj_feat, cond=enc_obj_cond[::-1])
-
-        x_hat = self.decode(z, obj_cond=obj_cond)
-        obj_msdf_hat = self.decode_object(obj_feat)
-        return x_hat, posterior, obj_feat, obj_msdf_hat

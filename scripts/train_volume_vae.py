@@ -9,8 +9,7 @@ import datetime
 import importlib
 from common.dataset_utils.datamodules import LocalGridDataModule
 from common.model.lgtrainer import LGTrainer
-from common.model.gridae import gridae
-from common.model.gridae.old.gridae import GRIDAE as GRIDAEOld
+from common.model.volume_vae import volume_vae
 from lightning.pytorch.callbacks import ModelCheckpoint
 # from common.model.gridvqvae.gridvqvae import GRIDVQVAE
 
@@ -20,7 +19,7 @@ OmegaConf.register_new_resolver("sub", lambda x, y: x - y, replace=True)
 OmegaConf.register_new_resolver("mul", lambda x, y: x * y, replace=True)
 OmegaConf.register_new_resolver("div", lambda x, y: x / y, replace=True)
 
-@hydra.main(config_path="../config", config_name="gridae")
+@hydra.main(config_path="../config", config_name="volume_vae")
 def main(cfg):
     print("Configuration:")
     print(OmegaConf.to_yaml(cfg))
@@ -37,11 +36,8 @@ def main(cfg):
                                     log_model=True, save_dir='logs/wandb_logs')
 
     # Initialize the model, data module, and trainer
-    if cfg.ae.name == 'GRIDAEOld':
-        model = GRIDAEOld(cfg.ae, obj_1d_feat=False)
-    else:
-        model_class = getattr(gridae, cfg.ae.name)
-        model = model_class(cfg.ae)
+    model_class = getattr(volume_vae, cfg.ae.name)
+    model = model_class(cfg.ae)
     ckpt_dir = logger.log_dir
     checkpoint_callback = ModelCheckpoint(
         monitor='val/total_loss',

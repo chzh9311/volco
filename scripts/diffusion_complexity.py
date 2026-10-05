@@ -2,7 +2,7 @@
 Measure GFLOPs, parameter count, peak GPU memory, and wall-clock runtime for
 the full dual-latent diffusion inference pipeline:
 
-    HandVAE (encode/decode)  +  DualUNetModel (1 denoising step × T)  +  GRIDAE (decode)
+    HandVAE (encode/decode)  +  DualUNetModel (1 denoising step × T)  +  VolumeVAE (decode)
 
 Usage:
     conda activate hoi_common
@@ -83,7 +83,7 @@ class UNetDenoiseWrapper(torch.nn.Module):
         return x_pred
 
 
-class GRIDAEEncodeWrapper(torch.nn.Module):
+class VolumeVAEEncodeWrapper(torch.nn.Module):
     """x (B*N, in_dim, K, K, K) → z (B*N, latent_dim)"""
     def __init__(self, model, obj_sdf):
         super().__init__()
@@ -96,7 +96,7 @@ class GRIDAEEncodeWrapper(torch.nn.Module):
         return posterior.mode()
 
 
-class GRIDAEDecodeWrapper(torch.nn.Module):
+class VolumeVAEDecodeWrapper(torch.nn.Module):
     """z (B*N, latent_dim) → recon_grid (B*N, c, K, K, K)"""
     def __init__(self, model, obj_cond):
         super().__init__()
@@ -155,15 +155,15 @@ def _summary(wrapper, input_data, device, label, depth=4):
 
 @hydra.main(config_path="../config", config_name="mlcdiff_128_16", version_base=None)
 def main(cfg):
-    from common.model.gridae import gridae as gridae_module
+    from common.model.volume_vae import volume_vae as volume_vae_module
     from common.model.diff.unet import DualUNetModel
     from common.model.vae.handvae import HandVAE
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # ── Build models ──────────────────────────────────────────────────────────
-    gridae_cls = getattr(gridae_module, cfg.ae.name)
-    gridae = gridae_cls(cfg.ae).to(device).eval()
+    volume_vae_cls = getattr(volume_vae_module, cfg.ae.name)
+    volume_vae = volume_vae_cls(cfg.ae).to(device).eval()
 
     hand_ae = HandVAE(cfg.hand_ae).to(device).eval()
 
@@ -172,7 +172,7 @@ def main(cfg):
     # ── Dimensions from config ─────────────────────────────────────────────────
     K       = cfg.msdf.kernel_size      # 8
     N       = cfg.msdf.num_grids        # 128  (sparse MSDF grid points)
-    d_x     = cfg.generator.unet.d_x   # 128  (GRIDAE latent dim)
+    d_x     = cfg.generator.unet.d_x   # 128  (VolumeVAE latent dim)
     d_y     = cfg.generator.unet.d_y   # 16   (HandVAE latent dim)
     n_pts   = cfg.generator.unet.n_pts  # 128
     T       = cfg.generator.diffusion.timesteps  # 1000
@@ -185,7 +185,7 @@ def main(cfg):
     hand_verts  = torch.randn(B, 3, N_verts, device=device)   # (B, 3, N_verts)
     hand_latent = torch.randn(B, d_y, device=device)
 
-    # GRIDAE (per grid)
+    # VolumeVAE (per grid)
     obj_sdf     = torch.randn(B * N, 1, K, K, K, device=device)  # (B*N, 1, K, K, K)
     lg_contact  = torch.randn(B * N, cfg.ae.in_dim, K, K, K, device=device)
 
@@ -197,16 +197,16 @@ def main(cfg):
     ts      = torch.zeros(B, dtype=torch.long, device=device)  # t = 0 representative
 
     # ── 1. Parameter counts ────────────────────────────────────────────────────
-    gridae_total, gridae_train = _params(gridae)
+    volume_vae_total, volume_vae_train = _params(volume_vae)
     hand_ae_total, hand_ae_train = _params(hand_ae)
     unet_total, unet_train = _params(unet)
-    total_params = gridae_total + hand_ae_total + unet_total
-    total_train  = gridae_train + hand_ae_train + unet_train
+    total_params = volume_vae_total + hand_ae_total + unet_total
+    total_train  = volume_vae_train + hand_ae_train + unet_train
 
     print(f"\n{'='*60}")
     print("  PARAMETER COUNTS")
     print(f"{'='*60}")
-    print(f"  GRIDAE        : {gridae_total/1e6:.3f} M")
+    print(f"  VolumeVAE     : {volume_vae_total/1e6:.3f} M")
     print(f"  HandVAE       : {hand_ae_total/1e6:.3f} M")
     print(f"  DualUNetModel : {unet_total/1e6:.3f} M")
     print(f"  ─────────────────────────────")
@@ -245,40 +245,40 @@ def main(cfg):
         f"DualUNet single step  [B, {d_y}+{d_x}×{n_pts}] → x_pred",
     )
 
-    # ── 6. GRIDAE — encode (per-grid) ─────────────────────────────────────────
+    # ── 6. VolumeVAE — encode (per-grid) ──────────────────────────────────────
     # Encode a single grid first to get obj_cond for the decode wrapper
     with torch.no_grad():
-        posterior_g1, _, obj_cond1 = gridae.encode(lg_contact[:1], obj_sdf[:1])
+        posterior_g1, _, obj_cond1 = volume_vae.encode(lg_contact[:1], obj_sdf[:1])
         z_grid1 = posterior_g1.mode()
         # Also encode all grids to get full z for GPU memory measurement
-        posterior_g, _, obj_cond = gridae.encode(lg_contact, obj_sdf)
+        posterior_g, _, obj_cond = volume_vae.encode(lg_contact, obj_sdf)
         z_grid = posterior_g.mode()
 
-    gridae_enc_macs = _summary(
-        GRIDAEEncodeWrapper(gridae, obj_sdf[:1]).to(device).eval(),
+    volume_vae_enc_macs = _summary(
+        VolumeVAEEncodeWrapper(volume_vae, obj_sdf[:1]).to(device).eval(),
         (lg_contact[:1],), device,
-        f"GRIDAE encode  [B*N,{cfg.ae.in_dim},K,K,K] → z [B*N,{d_x}]  (per grid)",
+        f"VolumeVAE encode  [B*N,{cfg.ae.in_dim},K,K,K] → z [B*N,{d_x}]  (per grid)",
     )
 
-    # ── 7. GRIDAE — decode (per-grid) ─────────────────────────────────────────
-    gridae_dec_macs = _summary(
-        GRIDAEDecodeWrapper(gridae, obj_cond1).to(device).eval(),
+    # ── 7. VolumeVAE — decode (per-grid) ──────────────────────────────────────
+    volume_vae_dec_macs = _summary(
+        VolumeVAEDecodeWrapper(volume_vae, obj_cond1).to(device).eval(),
         (z_grid1,), device,
-        f"GRIDAE decode  [B*N,{d_x}] → grid [B*N,c,K,K,K]  (per grid)",
+        f"VolumeVAE decode  [B*N,{d_x}] → grid [B*N,c,K,K,K]  (per grid)",
     )
 
     # Scale per-grid MACs to full batch of N grids
-    gridae_enc_macs_full = gridae_enc_macs * N
-    gridae_dec_macs_full = gridae_dec_macs * N
+    volume_vae_enc_macs_full = volume_vae_enc_macs * N
+    volume_vae_dec_macs_full = volume_vae_dec_macs * N
 
     # ── 8. Peak GPU memory ────────────────────────────────────────────────────
     peak_mb_encode = peak_mb_denoise = peak_mb_decode = None
     if device.type == "cuda":
-        # Encoding phase: hand_ae.encode + gridae.encode per grid
+        # Encoding phase: hand_ae.encode + volume_vae.encode per grid
         torch.cuda.reset_peak_memory_stats(device)
         with torch.no_grad():
             _ = hand_ae.encode(hand_verts)
-            _ = gridae.encode(lg_contact, obj_sdf)
+            _ = volume_vae.encode(lg_contact, obj_sdf)
         peak_mb_encode = torch.cuda.max_memory_allocated(device) / 1024 ** 2
 
         # Denoising: one full reverse pass (T steps)
@@ -292,11 +292,11 @@ def main(cfg):
                 x, _ = unet(x, ts_t, cond_dict, is_train=False)
         peak_mb_denoise = torch.cuda.max_memory_allocated(device) / 1024 ** 2
 
-        # Decoding phase: hand_ae.decode + gridae.decode per grid
+        # Decoding phase: hand_ae.decode + volume_vae.decode per grid
         torch.cuda.reset_peak_memory_stats(device)
         with torch.no_grad():
             _ = hand_ae.decode(hand_latent)
-            _ = gridae.decode(z_grid, obj_cond)
+            _ = volume_vae.decode(z_grid, obj_cond)
         peak_mb_decode = torch.cuda.max_memory_allocated(device) / 1024 ** 2
 
     # ── 9. Wall-clock runtime ─────────────────────────────────────────────────
@@ -309,7 +309,7 @@ def main(cfg):
     def _run_encode():
         with torch.no_grad():
             hand_ae.encode(hand_verts)
-            gridae.encode(lg_contact, obj_sdf)
+            volume_vae.encode(lg_contact, obj_sdf)
 
     def _run_unet_cond():
         with torch.no_grad():
@@ -329,7 +329,7 @@ def main(cfg):
     def _run_decode():
         with torch.no_grad():
             hand_ae.decode(hand_latent)
-            gridae.decode(z_grid, obj_cond)
+            volume_vae.decode(z_grid, obj_cond)
 
     t_encode, t_encode_sd = _timeit(_run_encode, device)
     t_cond, t_cond_sd = _timeit(_run_unet_cond, device)
@@ -346,7 +346,7 @@ def main(cfg):
     print(f"\n{'='*60}")
     print("  INFERENCE SUMMARY  (B=1, N=128 grids, T=1000 steps)")
     print(f"{'='*60}")
-    print(f"  GRIDAE        : {gridae_total/1e6:.3f} M params")
+    print(f"  VolumeVAE     : {volume_vae_total/1e6:.3f} M params")
     print(f"  HandVAE       : {hand_ae_total/1e6:.3f} M params")
     print(f"  DualUNetModel : {unet_total/1e6:.3f} M params")
     print(f"  Total         : {total_params/1e6:.3f} M params")
@@ -357,12 +357,12 @@ def main(cfg):
     print(f"  DualUNet obj conditioning : {gflops(unet_cond_macs):.4f} GFLOPs")
     print(f"  DualUNet 1 denoise step  : {gflops(unet_step_macs):.4f} GFLOPs")
     print(f"  DualUNet {T} steps total  : {gflops(unet_step_macs * T):.2f} GFLOPs")
-    print(f"  GRIDAE encode  (N grids) : {gflops(gridae_enc_macs_full):.4f} GFLOPs")
-    print(f"  GRIDAE decode  (N grids) : {gflops(gridae_dec_macs_full):.4f} GFLOPs")
+    print(f"  VolumeVAE enc. (N grids) : {gflops(volume_vae_enc_macs_full):.4f} GFLOPs")
+    print(f"  VolumeVAE dec. (N grids) : {gflops(volume_vae_dec_macs_full):.4f} GFLOPs")
     total_inf_gflops = (
         gflops(enc_hand_macs) + gflops(dec_hand_macs) +
         gflops(unet_cond_macs) + gflops(unet_step_macs * T) +
-        gflops(gridae_enc_macs_full) + gflops(gridae_dec_macs_full)
+        gflops(volume_vae_enc_macs_full) + gflops(volume_vae_dec_macs_full)
     )
     print(f"  ───────────────────────────────────────────────────────")
     print(f"  Total inference GFLOPs   : {total_inf_gflops:.2f}")
@@ -376,12 +376,12 @@ def main(cfg):
         print("  Peak GPU mem   : N/A (no CUDA)")
     print()
     print(f"  ── Wall-clock runtime ({device.type}) ──────────────────────────")
-    print(f"  HandVAE+GRIDAE encode    : {t_encode*1e3:8.2f} ms  (± {t_encode_sd*1e3:.2f})")
+    print(f"  HandVAE+VolumeVAE encode : {t_encode*1e3:8.2f} ms  (± {t_encode_sd*1e3:.2f})")
     print(f"  DualUNet obj conditioning : {t_cond*1e3:8.2f} ms  (± {t_cond_sd*1e3:.2f})")
     print(f"  DualUNet 1 denoise step  : {t_step*1e3:8.2f} ms  (± {t_step_sd*1e3:.2f})")
     print(f"  DualUNet {T} steps total  : {t_denoise_full:8.2f} s   "
           f"(1 step × {T} = {t_step*T:.2f} s)")
-    print(f"  HandVAE+GRIDAE decode    : {t_decode*1e3:8.2f} ms  (± {t_decode_sd*1e3:.2f})")
+    print(f"  HandVAE+VolumeVAE decode : {t_decode*1e3:8.2f} ms  (± {t_decode_sd*1e3:.2f})")
     print(f"  ───────────────────────────────────────────────────────")
     print(f"  Total inference time     : {t_total:8.2f} s")
     if t_total > 0:

@@ -10,8 +10,8 @@ from common.dataset_utils.datamodules import HOIDatasetModule
 # from common.model.mlctrainer import MLCTrainer
 import common.model.diff.mdm.gaussian_diffusion as mdm_gd
 from common.model.diff.unet import UNetModel, DualUNetModel
-from common.model.gridae import gridae as gridae_module
-from common.model.gridae.old.gridae import GRIDAE as GRIDAEOld
+from common.model.volume_vae import volume_vae as volume_vae_module
+from common.model.volume_vae.old.volume_vae import VolumeVAE as VolumeVAEOld
 from common.model.vae.handvae import HandVAE
 # from common.model.hand_ipt_vae.hand_imputation import HandImputationVAE
 from common.model.lgcdifftrainer import LGCDiffTrainer
@@ -37,10 +37,10 @@ def main(cfg):
     mdm_cfg = cfg.generator.mdm
     # DDPM (the base version of diffusion)
     # diffusion1 = DDPM(cfg.generator.ddpm)
-    if cfg.ae.name == 'GRIDAEOld':
-        gridae = GRIDAEOld(cfg.ae, obj_1d_feat=True)
+    if cfg.ae.name == 'VolumeVAEOld':
+        volume_vae = VolumeVAEOld(cfg.ae, obj_1d_feat=True)
     else:
-        gridae = getattr(gridae_module, cfg.ae.name)(cfg.ae)
+        volume_vae = getattr(volume_vae_module, cfg.ae.name)(cfg.ae)
     hand_ae = HandVAE(cfg.hand_ae)
     # sd = torch.load(cfg.hand_ae.pretrained_weight, map_location='cpu', weights_only=True)['state_dict']
     # load_pl_ckpt(hand_ae, sd, prefix='model.')
@@ -101,11 +101,11 @@ def main(cfg):
         msdf_cfg=cfg.msdf)
 
     if cfg.run_phase == 'train':
-        pl_model = trainer_module(grid_ae=gridae, model=model, diffusion=diffusion, hand_ae=hand_ae, cfg=cfg)
+        pl_model = trainer_module(volume_vae=volume_vae, model=model, diffusion=diffusion, hand_ae=hand_ae, cfg=cfg)
         trainer.fit(pl_model, datamodule=data_module, ckpt_path=cfg.train.get('resume_ckpt', None))
     elif cfg.run_phase == 'val':
-        # pl_model = LGCDiffTrainer(gridae, model, cfg)
-        pl_model = trainer_module.load_from_checkpoint(cfg.val.get('ckpt_path', None), grid_ae=gridae, model=model, diffusion=diffusion, hand_ae=hand_ae, cfg=cfg)
+        # pl_model = LGCDiffTrainer(volume_vae, model, cfg)
+        pl_model = trainer_module.load_from_checkpoint(cfg.val.get('ckpt_path', None), volume_vae=volume_vae, model=model, diffusion=diffusion, hand_ae=hand_ae, cfg=cfg)
         trainer.validate(pl_model, datamodule=data_module)
     else:
         if hasattr(cfg, 'seed'):
@@ -114,11 +114,11 @@ def main(cfg):
             set_seed(42)  # default seed
 
         if cfg.ckpt_path == "Random":
-            print("Using random weights for model, grid_ae, and hand_ae.")
+            print("Using random weights for model, volume_vae, and hand_ae.")
         else:
             sd = torch.load(cfg.ckpt_path, map_location='cpu', weights_only=False)['state_dict']
             print('total keys in ckpt:', len(sd.keys()))
-            load_pl_ckpt(gridae, sd, prefix='grid_ae.')
+            load_pl_ckpt(volume_vae, sd, prefix='volume_vae.')
             load_pl_ckpt(model, sd, prefix='model.')
             # LGCDiffTrainer does not register hand_ae as a submodule, so checkpoints
             # from that trainer carry no 'hand_ae.' keys. Fall back to the hand VAE's
@@ -134,12 +134,12 @@ def main(cfg):
                 print(f"No 'hand_ae.' keys in ckpt; loading hand_ae from {hand_ae_ckpt}")
                 hand_sd = torch.load(hand_ae_ckpt, map_location='cpu', weights_only=False)['state_dict']
                 load_pl_ckpt(hand_ae, hand_sd, prefix='model.')
-            known_prefixes = ('grid_ae.', 'model.', 'hand_ae.')
+            known_prefixes = ('volume_vae.', 'model.', 'hand_ae.')
             unused_keys = [k for k in sd.keys() if not k.startswith(known_prefixes)]
             print(f'Unused keys in ckpt: {unused_keys}')
 
-        pl_model = trainer_module(grid_ae=gridae, model=model, diffusion=diffusion, hand_ae=hand_ae, cfg=cfg)
-        # pl_model = LGCDiffTrainer.load_from_checkpoint(cfg.ckpt_path, grid_ae=gridae, model=model, cfg=cfg)
+        pl_model = trainer_module(volume_vae=volume_vae, model=model, diffusion=diffusion, hand_ae=hand_ae, cfg=cfg)
+        # pl_model = LGCDiffTrainer.load_from_checkpoint(cfg.ckpt_path, volume_vae=volume_vae, model=model, cfg=cfg)
         trainer.test(pl_model, datamodule=data_module)
 
 

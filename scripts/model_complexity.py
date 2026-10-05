@@ -1,5 +1,5 @@
 """
-Measure GFLOPs, parameter count, and peak GPU memory for the GRIDAE model.
+Measure GFLOPs, parameter count, and peak GPU memory for the VolumeVAE model.
 
 Usage:
     conda activate hoi_common
@@ -41,13 +41,13 @@ class DecodeWrapper(torch.nn.Module):
         return self.model.decode(z, obj_cond=self.obj_cond)
 
 
-@hydra.main(config_path="../config", config_name="gridae", version_base=None)
+@hydra.main(config_path="../config", config_name="volume_vae", version_base=None)
 def main(cfg):
-    from common.model.gridae import gridae as gridae_module
+    from common.model.volume_vae import volume_vae as volume_vae_module
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model_class = getattr(gridae_module, cfg.ae.name)
+    model_class = getattr(volume_vae_module, cfg.ae.name)
     model = model_class(cfg.ae).to(device)
     model.eval()
 
