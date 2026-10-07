@@ -1,7 +1,6 @@
 """
 Adopted from SceneDiffuser: https://github.com/scenediffuser/Scene-Diffuser 
 """
-from operator import pos
 from typing import Dict
 from einops import rearrange
 import torch
@@ -161,7 +160,6 @@ class DualUNetModel(nn.Module):
         ## create scene model from config
         # self.scene_model = create_scene_model(cfg.scene_model.name, **scene_model_args)
         self.obj_feat_net = Pointnet_feat_net(**cfg.obj_encoder)
-        self.global2local_fn = None
 
         time_embed_dim = self.d_model * cfg.time_embed_mult
         self.time_embed = nn.Sequential(

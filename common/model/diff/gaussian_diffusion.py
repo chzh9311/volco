@@ -14,8 +14,8 @@ import torch.nn.functional as F
 from copy import deepcopy
 from .nn import mean_flat, sum_flat
 from .losses import normal_kl, discretized_gaussian_log_likelihood
+from .schedule import make_schedule_ddpm
 from common.utils.geometry import cp_match, GridDistanceToContact
-from common.model.diff.dm.schedule import make_schedule_ddpm
 
 def get_named_beta_schedule(schedule_name, num_diffusion_timesteps, beta_range=[0.0001, 0.02], scale_betas=1.):
     """

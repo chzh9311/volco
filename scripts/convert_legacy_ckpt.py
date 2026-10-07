@@ -1,6 +1,6 @@
 """
 Convert diffusion checkpoints saved before the GRIDAE -> VolumeVAE rename so they
-load with the current LGCDiffTrainer / GraspDiffTrainer.
+load with the current GraspDiffTrainer.
 
 - state_dict keys 'grid_ae.*' are renamed to 'volume_vae.*'
 - the saved hyperparameter ae.name 'GRIDAE*' is renamed to 'VolumeVAE*'

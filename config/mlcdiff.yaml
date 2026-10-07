@@ -3,7 +3,7 @@ defaults:
   # - msdf: "128_4"
   # - msdf: "64_4"
   - data: grab_multi_contact
-  - ae: volume_vae_128latent_v2
+  - ae: volume_vae_128latent
   # - ae: volume_vae_64latent_v2
   - hand_ae: handvae_16latent
   - generator: dual_ldm

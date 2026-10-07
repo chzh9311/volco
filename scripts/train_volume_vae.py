@@ -8,7 +8,7 @@ import torch
 import datetime
 import importlib
 from common.dataset_utils.datamodules import LocalGridDataModule
-from common.model.lgtrainer import LGTrainer
+from common.model.volumevaetrainer import VolumeVAETrainer
 from common.model.volume_vae import volume_vae
 from lightning.pytorch.callbacks import ModelCheckpoint
 # from common.model.gridvqvae.gridvqvae import GRIDVQVAE
@@ -68,17 +68,17 @@ def main(cfg):
 
     data_module = LocalGridDataModule(cfg)
     if cfg.run_phase == 'train':
-        pl_trainer = LGTrainer(model, cfg)
+        pl_trainer = VolumeVAETrainer(model, cfg)
         trainer = L.Trainer(**cfg.trainer, logger=logger, callbacks=[checkpoint_callback])
         # trainer.fit(pl_trainer, datamodule=data_module)
         trainer.fit(pl_trainer, datamodule=data_module, ckpt_path=cfg.train.get('resume_ckpt', None))
     elif cfg.run_phase == 'val':
-        pl_trainer = LGTrainer.load_from_checkpoint(cfg.ckpt_path, model=model, cfg=cfg)
+        pl_trainer = VolumeVAETrainer.load_from_checkpoint(cfg.ckpt_path, model=model, cfg=cfg)
         trainer = L.Trainer(**cfg.trainer, logger=logger)
         trainer.validate(pl_trainer, datamodule=data_module)
     else:
         cfg.trainer.enable_progress_bar = True
-        pl_trainer = LGTrainer.load_from_checkpoint(cfg.ckpt_path, model=model, cfg=cfg)
+        pl_trainer = VolumeVAETrainer.load_from_checkpoint(cfg.ckpt_path, model=model, cfg=cfg)
         trainer = L.Trainer(**cfg.trainer, logger=logger)
         trainer.test(pl_trainer, datamodule=data_module)
     

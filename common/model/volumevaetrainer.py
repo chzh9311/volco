@@ -19,7 +19,7 @@ from common.model.losses import masked_rec_loss
 from common.msdf.utils.msdf import get_grid
 
 
-class LGTrainer(L.LightningModule):
+class VolumeVAETrainer(L.LightningModule):
     """
     The Lightning trainer interface to train Local-grid based contact autoencoder.
     """

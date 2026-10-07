@@ -8,14 +8,12 @@ import datetime
 from omegaconf import OmegaConf
 from common.dataset_utils.datamodules import HOIDatasetModule
 # from common.model.mlctrainer import MLCTrainer
-import common.model.diff.mdm.gaussian_diffusion as mdm_gd
+import common.model.diff.gaussian_diffusion as mdm_gd
 from common.model.diff.unet import UNetModel, DualUNetModel
 from common.model.volume_vae import volume_vae as volume_vae_module
-from common.model.volume_vae.old.volume_vae import VolumeVAE as VolumeVAEOld
-from common.model.vae.handvae import HandVAE
+from common.model.handvae import HandVAE
 # from common.model.hand_ipt_vae.hand_imputation import HandImputationVAE
-from common.model.lgcdifftrainer import LGCDiffTrainer
-from common.model.graspdifftrainer import GraspDiffTrainer
+from common.model.volcodifftrainer import VolCoDiffTrainer
 from common.utils.misc import set_seed, load_pl_ckpt
 from lightning.pytorch.callbacks import ModelCheckpoint
 
@@ -37,10 +35,7 @@ def main(cfg):
     mdm_cfg = cfg.generator.mdm
     # DDPM (the base version of diffusion)
     # diffusion1 = DDPM(cfg.generator.ddpm)
-    if cfg.ae.name == 'VolumeVAEOld':
-        volume_vae = VolumeVAEOld(cfg.ae, obj_1d_feat=True)
-    else:
-        volume_vae = getattr(volume_vae_module, cfg.ae.name)(cfg.ae)
+    volume_vae = getattr(volume_vae_module, cfg.ae.name)(cfg.ae)
     hand_ae = HandVAE(cfg.hand_ae)
     # sd = torch.load(cfg.hand_ae.pretrained_weight, map_location='cpu', weights_only=True)['state_dict']
     # load_pl_ckpt(hand_ae, sd, prefix='model.')
@@ -81,12 +76,11 @@ def main(cfg):
     data_module = HOIDatasetModule(cfg)
 
     # Start training
+    trainer_module = VolCoDiffTrainer
     if cfg.generator.model_name == 'dual_latent_diffusion':
-        trainer_module = GraspDiffTrainer
         model_class = DualUNetModel
         diffusion_class = mdm_gd.DualGaussianDiffusion
     else:
-        trainer_module = LGCDiffTrainer
         model_class = UNetModel
         diffusion_class = mdm_gd.GaussianDiffusion
     
@@ -104,7 +98,6 @@ def main(cfg):
         pl_model = trainer_module(volume_vae=volume_vae, model=model, diffusion=diffusion, hand_ae=hand_ae, cfg=cfg)
         trainer.fit(pl_model, datamodule=data_module, ckpt_path=cfg.train.get('resume_ckpt', None))
     elif cfg.run_phase == 'val':
-        # pl_model = LGCDiffTrainer(volume_vae, model, cfg)
         pl_model = trainer_module.load_from_checkpoint(cfg.val.get('ckpt_path', None), volume_vae=volume_vae, model=model, diffusion=diffusion, hand_ae=hand_ae, cfg=cfg)
         trainer.validate(pl_model, datamodule=data_module)
     else:
@@ -118,10 +111,10 @@ def main(cfg):
         else:
             sd = torch.load(cfg.ckpt_path, map_location='cpu', weights_only=False)['state_dict']
             print('total keys in ckpt:', len(sd.keys()))
-            load_pl_ckpt(volume_vae, sd, prefix='volume_vae.')
+            load_pl_ckpt(volume_vae, sd, prefix='grid_ae.')
             load_pl_ckpt(model, sd, prefix='model.')
-            # LGCDiffTrainer does not register hand_ae as a submodule, so checkpoints
-            # from that trainer carry no 'hand_ae.' keys. Fall back to the hand VAE's
+            # Without dual diffusion the trainer does not register hand_ae as a submodule,
+            # so those checkpoints carry no 'hand_ae.' keys. Fall back to the hand VAE's
             # own pretrained checkpoint (which stores its weights under 'model.').
             if any(k.startswith('hand_ae.') for k in sd):
                 load_pl_ckpt(hand_ae, sd, prefix='hand_ae.')
@@ -139,7 +132,6 @@ def main(cfg):
             print(f'Unused keys in ckpt: {unused_keys}')
 
         pl_model = trainer_module(volume_vae=volume_vae, model=model, diffusion=diffusion, hand_ae=hand_ae, cfg=cfg)
-        # pl_model = LGCDiffTrainer.load_from_checkpoint(cfg.ckpt_path, volume_vae=volume_vae, model=model, cfg=cfg)
         trainer.test(pl_model, datamodule=data_module)
 
 
