@@ -2,6 +2,17 @@
 ## [Unreleased]
 
 
+<a name="r.1.0"></a>
+## [r.1.0] - 2026-10-07
+### Bug Fixes
+- Remove more files
+
+### Code Refactoring
+- further rename and sanitization
+- Corrected legacy model names.
+- Removed unnecessary files for release.
+
+
 <a name="pre-release-archive"></a>
 ## [pre-release-archive] - 2026-10-02
 ### Code Refactoring
@@ -147,7 +158,8 @@
 - Enable dumping local grids first.
 
 
-[Unreleased]: /compare/pre-release-archive...HEAD
+[Unreleased]: /compare/r.1.0...HEAD
+[r.1.0]: /compare/pre-release-archive...r.1.0
 [pre-release-archive]: /compare/v1.2.0...pre-release-archive
 [v1.2.0]: /compare/v1.1.1...v1.2.0
 [v1.1.1]: /compare/v1.1.0...v1.1.1
