@@ -9,7 +9,7 @@ Environment setups, training & testing instructions, and pretrained checkpoints 
 If you find our work useful, please cite with:
 
 ```bibtex
-@inproceedings{zhou2022codeformer,
+@inproceedings{chen2026volco,
     author = {Chen, Zhuo and Cheng, Yihua and Leonardis, Aleš and Chang, Hyung Jin},
     title = {VolCo: Volumetric Contact for High-Fidelity Human Grasp Generation},
     booktitle = {The Fortieth Annual Conference on Neural Information Processing Systems (NeurIPS)},
