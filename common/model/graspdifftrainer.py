@@ -22,6 +22,7 @@ from common.model.pose_optimizer import optimize_pose_by_contact, optimize_pose_
 from .lgcdifftrainer import LGCDiffTrainer
 from common.model.handobject import HandObject, recover_hand_verts_from_contact
 from common.utils.vis import o3dmesh, o3dmesh_from_trimesh, geom_to_img, visualize_recon_hand_w_object, visualize_grid_contact, geom_to_img_unified, geom_to_video_o3d
+from common.utils.glb import GREY_RGB, save_glb, solid_mesh, grasp_geoms, recon_hand_geoms, volco_grid_geoms
 from common.msdf.utils.msdf import get_grid, calc_local_grid_all_pts_gpu
 from common.evaluation.eval_fns import calculate_metrics
 from einops import rearrange
@@ -453,6 +454,10 @@ class GraspDiffTrainer(LGCDiffTrainer):
         else:
             pred_hand_verts, pred_verts_mask = recon_hand_verts, recon_verts_mask
 
+        if self.cfg.test.get('save_glb', True):
+            self._save_generated_glb(obj_name, handobject, handV, recon_lg_contact, obj_msdf_center, grid_coords,
+                                     pred_hand_verts, pred_verts_mask)
+
         vis_result = self.cfg.test.get('vis_result', True)
 
         if vis_result:
@@ -499,6 +504,34 @@ class GraspDiffTrainer(LGCDiffTrainer):
             # o3d.visualization.draw(gt_geoms + [g['geometry'].translate((0, 0.25, 0)) if 'geometry' in g else g for g in pred_geoms])
 
         return result
+
+    def _save_generated_glb(self, obj_name, handobject, handV, recon_lg_contact, obj_msdf_center, grid_coords,
+                            recon_verts, recon_mask, out_root=osp.join('tmp', 'generated')):
+        """
+        Save each generated sample as .glb files for web viewing (scripts/glb_viewer.py --root tmp/generated):
+        out_root/{obj_name}_{sample:02d}/{obj_name}_{volco_contact,volco_cse,recon_hand,grasp}.glb
+        Only grids with max predicted contact > 0.5 are kept in the volco maps.
+        :param handV: (S, 778, 3) fitted hands; recon_lg_contact: (S, N, K, K, K, 1+D); obj_msdf_center: (S, N, 3)
+        :param grid_coords: (S, N, K^3, 3); recon_verts / recon_mask: (S, 778, 3) / (S, 778) local hand reconstruction
+        """
+        obj_mesh = handobject.obj_models[0]  # CoM-centred, same frame as the generated hands
+        obj_grey = solid_mesh(obj_mesh.vertices, obj_mesh.faces, GREY_RGB)
+        mano_faces = self.mano_layer.th_faces.detach().cpu().numpy()
+        n_samples, n_grids = recon_lg_contact.shape[:2]
+        for i in range(n_samples):
+            prefix = osp.join(out_root, f'{obj_name}_{i:02d}', obj_name)
+            volco = volco_grid_geoms(
+                grid_centers=obj_msdf_center[i].detach().cpu().numpy(),
+                grid_pts=grid_coords[i].reshape(-1, 3).detach().cpu().numpy(),
+                grid_contact=recon_lg_contact[i, ..., 0].reshape(n_grids, -1).detach().cpu().numpy(),
+                grid_cse=recon_lg_contact[i, ..., 1:].reshape(-1, self.cse_dim),
+                hand_emb=handobject.hand_cse, hand_part_ids=handobject.hand_part_ids, grid_scale=self.cfg.msdf.scale)
+            save_glb(f'{prefix}_volco_contact.glb', {'object': obj_grey, 'contact_points': volco['contact_pts']})
+            save_glb(f'{prefix}_volco_cse.glb', {'object': obj_grey, 'cse_points': volco['cse_pts']})
+            save_glb(f'{prefix}_recon_hand.glb', recon_hand_geoms(
+                obj_mesh, recon_verts[i].detach().cpu().numpy(), recon_mask[i].detach().cpu().numpy(),
+                mano_faces, handobject.hand_part_ids))
+            save_glb(f'{prefix}_grasp.glb', grasp_geoms(obj_mesh, handV[i], self.closed_mano_faces))
 
     def _test_step_metrics(self, batch_idx, obj_name, handV, handJ, handobject):
         """Compute grasp quality metrics for a batch of predicted hands and record them.

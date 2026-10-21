@@ -1,15 +1,17 @@
 defaults:
-  - msdf: dense
+  - msdf: sparse
   - data: grab_multi_contact
   - ae: gridae_128latent_v2
   - pose_optimizer: lg_base
+  - contact: volco
   - _self_
 
-contact_unit: "grid"
-correspondence_type: "cse"
+contact_unit: ${contact.contact_unit}
+correspondence_type: ${contact.correspondence_type}
 
 data:
   contact_unit: ${contact_unit}
+  correspondence_type: ${correspondence_type}  # read by HandObject (defaults to 'cse' when missing)
 
 train:
   batch_size: 32

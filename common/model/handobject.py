@@ -87,11 +87,14 @@ class HandObject:
         new_ho.batch_size = self.batch_size
         return new_ho
 
-    def load_from_batch(self, batch, obj_templates=None, vis_obj_template=None, obj_hulls=None, pool=None):
+    def load_from_batch(self, batch, obj_templates=None, vis_obj_template=None, obj_hulls=None, pool=None,
+                        n_resample_obj_pts=None):
         """
         Load the sampled vertices of objects from batched data. Used for training & testing.
         Force labels are also loaded.
         Used in training and validating
+        :param n_resample_obj_pts: point contact only. If set, replace the dataset's object samples with this many
+            points freshly sampled from obj_templates (required) before computing the contact maps.
         """
         self.obj_verts = batch['objSamplePts'].clone().float().to(self.device)
         self.obj_normals = batch['objSampleNormals'].clone().float().to(self.device)
@@ -317,14 +320,17 @@ class HandObject:
 
         elif self.contact_unit == 'point':
         ## Calculate contacts
-            # self.obj_verts = []
-            # self.obj_normals = []
-            # for obj_mesh in self.obj_models:
-            #     points, fidx = trimesh.sample.sample_surface(obj_mesh, self.cfg.msdf.kernel_size ** 3 * self.cfg.msdf.num_grids)
-            #     self.obj_verts.append(points)
-            #     self.obj_normals.append(obj_mesh.face_normals[fidx])
-            # self.obj_verts = torch.as_tensor(np.stack(self.obj_verts, axis=0), dtype=torch.float32, device=self.device)  # (B, N*K^3, 3)
-            # self.obj_normals = torch.as_tensor(np.stack(self.obj_normals, axis=0), dtype=torch.float32, device=self.device)  # (B, N*K^3, 3)
+            if n_resample_obj_pts:
+                assert len(self.obj_models) == self.batch_size, "n_resample_obj_pts requires obj_templates"
+                obj_verts, obj_normals = [], []
+                for b, obj_mesh in enumerate(self.obj_models):
+                    points, fidx = trimesh.sample.sample_surface(obj_mesh, n_resample_obj_pts)
+                    if not self.normalize:  # obj_models are in world frame, obj_verts / hand_verts are CoM-centred
+                        points = points - self.obj_com[b].detach().cpu().numpy()
+                    obj_verts.append(points)
+                    obj_normals.append(obj_mesh.face_normals[fidx])
+                self.obj_verts = torch.as_tensor(np.stack(obj_verts, axis=0), dtype=torch.float32, device=self.device)  # (B, n, 3)
+                self.obj_normals = torch.as_tensor(np.stack(obj_normals, axis=0), dtype=torch.float32, device=self.device)  # (B, n, 3)
             grid_dist_to_contact = GridDistanceToContact(**self.cfg.point_contact)
 
             if self.correspondence_type == 'part':
@@ -373,6 +379,10 @@ class HandObject:
                 self.point_cse = torch.stack(self.point_cse, dim=0)  # (B, M*K^3, cse_dim)
                 self.contact_map = torch.stack(self.contact_map, dim=0).unsqueeze(-1)  # (B, M*K^3, 1)
                 self.pmap = torch.stack(self.pmap, dim=0).long()
+            else:
+                obj_cmap, _, nn_idx = calculate_contact_capsule(self.hand_verts, self.hand_normals,
+                                                                self.obj_verts, self.obj_normals)
+                self.contact_map = obj_cmap.to(self.device).squeeze(-1)
 
 
     @property

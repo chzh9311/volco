@@ -47,17 +47,18 @@ test:
   n_samples: 20
   batch_size: ${test.n_samples}
   vis_result: false  # set to false to skip rendering turntable videos to tmp/process_vid
+  save_glb: true  # save generated contact / cse / recon hand / grasp as .glb to tmp/generated/{obj}_{sample}/
   use_cache: false  # if true, reuse cached hand results (tmp/grab/result_{obj}.pkl) instead of rerunning diffusion + pose optimization
   base_criteria:
-    - "Simulation Displacement"
-    - "Penetration Depth"
-    - "Intersection Volume"
+    # - "Simulation Displacement"
+    # - "Penetration Depth"
+    # - "Intersection Volume"
     # - "Boolean Intersection Volume"
-    - "Contact Area"
+    # - "Contact Area"
     - "Contact Ratio"
     - "Cluster Size"
     - "Entropy"
-    - "IV/CA"  # per-sample Intersection Volume / Contact Area, then averaged (needs both above active)
+    # - "IV/CA"  # per-sample Intersection Volume / Contact Area, then averaged (needs both above active)
   criteria: ${test.base_criteria}
 
 trainer: ## For instantiating pytorch-lightning Trainer
