@@ -42,7 +42,7 @@ def main(cfg):
     else:
         model_class = getattr(gridae, cfg.ae.name)
         model = model_class(cfg.ae)
-    ckpt_dir = logger.log_dir
+    ckpt_dir = cfg.checkpoint.dirpath if cfg.checkpoint.dirpath is not None else logger.log_dir
     checkpoint_callback = ModelCheckpoint(
         monitor='val/total_loss',
         dirpath=ckpt_dir,
