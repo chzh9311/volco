@@ -3,6 +3,11 @@ mano_root: data/misc/mano_v1_2/models
 dataset_path: data/grab
 hand_cse_dim: 4
 hand_cse_path: common/model/hand_cse/hand_cse_${data.hand_cse_dim}.ckpt
+
+## point: cache only the valid points (sampled with sample_rate among those with the hand inside the
+##        local volume); the local grids are computed on the GPU during training.
+## all: cache all data: msdf & volco
+cache: "point"
 preprocessed_dir: data/preprocessed
 MSDF_dir: data/preprocessed/grab_msdf
 augment: false

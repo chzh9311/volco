@@ -1,6 +1,5 @@
 defaults:
-  # - msdf: sparse
-  - msdf: "dense"
+  - msdf: "128_8"
   # - msdf: "64_4"
   - data: grab_multi_contact
   # - ae: volume_vae_128latent_v2

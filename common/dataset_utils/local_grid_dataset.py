@@ -17,6 +17,25 @@ import h5py
 from common.utils.geometry import GridDistanceToContact
 from common.msdf.utils.msdf import calc_local_grid_1pt
 
+CACHE_MODES = ('all', 'point')
+
+
+def local_grid_cache_path(cfg, split):
+    """
+    Path of the preprocessed local grid data for a split (cfg is the data config).
+      cache=all:   H5 file with the full local grids (object SDF, hand distance, nearest faces/points).
+      cache=point: npz file with only the (point, frame) pairs to train on; the grids are computed online.
+    """
+    preprocessed_dir = cfg.get('preprocessed_dir', 'data/preprocessed')
+    if cfg.cache == 'all':
+        return osp.join(preprocessed_dir, cfg.dataset_name,
+                        f'local_grid_{cfg.msdf.kernel_size}_{cfg.msdf.scale*1000:.1f}mm', f'{split}.h5')
+    if cfg.cache == 'point':
+        # The point set does not depend on the kernel size, but it does on the frame downsampling and the sampling rate.
+        return osp.join(preprocessed_dir, cfg.dataset_name, f'local_grid_points_{cfg.msdf.scale*1000:.1f}mm',
+                        f'{split}_every{cfg.downsample_rate[split]}_sr{cfg.sample_rate[split]}.npz')
+    raise ValueError(f"data.cache must be one of {CACHE_MODES}, got {cfg.cache!r}")
+
 
 class LocalGridDataset(Dataset):
     """
@@ -33,15 +52,51 @@ class LocalGridDataset(Dataset):
         self.preprocessed_dir = cfg.get('preprocessed_dir', 'data/preprocessed')
         self.downsample_rate = cfg.downsample_rate[split]
         self.split = split
+        self.cache = cfg.cache
 
-        # Load local grid data from H5 file
-        local_grid_file = osp.join(cfg.preprocessed_dir, self.dataset_name,
-                                   f'local_grid_{self.kernel_size}_{self.grid_scale*1000:.1f}mm',
-                                   f'{split}.h5')
+        local_grid_file = local_grid_cache_path(cfg, split)
         if not osp.exists(local_grid_file):
             raise FileNotFoundError(f"Local grid file not found: {local_grid_file}. Please run LocalGridDataModule.prepare_data() first.")
-
         self.local_grid_file = local_grid_file
+        if self.cache == 'all':
+            self._load_grid_cache(cfg)
+        else:
+            # (point_idx, frame_idx) pairs; point_idx indexes the object's full sample point set.
+            self._grid_sample_idx = np.load(local_grid_file)['grid_sample_idx']
+            self.n_grids = len(self._grid_sample_idx)
+            self._valid_indices = np.arange(self.n_grids)
+            print(f"Local grid points ({split}): {self.n_grids} from {local_grid_file}")
+            self._obj_sdf = None  # per-object SDFs, built lazily in each worker
+        # Per-worker H5 handle, initialized lazily in __getitem__ to avoid
+        # multiprocessing fork issues and repeated open/close overhead.
+        self._h5_handle = None
+
+        hand_cse_sd = torch.load(cfg.get('hand_cse_path', 'data/misc/hand_cse.ckpt'), weights_only=True)['state_dict']
+        self.hand_cse = hand_cse_sd['embedding_tensor'].detach().cpu().numpy()
+        self.mano_faces = hand_cse_sd['cano_faces'].detach().cpu().numpy()
+        self.obj_info = {}
+        self.close_mano_faces = np.load(osp.join('data', 'misc', 'closed_mano_r_faces.npy'), allow_pickle=True)
+        ## Downsample data
+        # self.idx2sample = self.idx2sample[::cfg.downsample_rate[split], :]
+        coords = torch.tensor([(i, j, k) for i in range(self.kernel_size)
+                                    for j in range(self.kernel_size)
+                                    for k in range(self.kernel_size)], dtype=torch.float32)
+        normalized_coords = 2 * coords - (self.kernel_size - 1)
+        self.normalized_coords = (normalized_coords / (self.kernel_size - 1))
+
+        self._load_data()
+        if self.downsample_rate > 1:
+            self.rh_data = self.sample_frames(self.rh_data)
+            self.object_data = self.sample_frames(self.object_data)
+            self.frame_names = self.sample_frames(self.frame_names)
+        if self.cache == 'point':
+            n_frames = int(np.load(local_grid_file)['n_frames'])
+            if n_frames != len(self.frame_names):
+                raise ValueError(f"{local_grid_file} was built for {n_frames} frames but the {split} split has "
+                                 f"{len(self.frame_names)}; delete it so prepare_data rebuilds it.")
+
+    def _load_grid_cache(self, cfg):
+        local_grid_file = self.local_grid_file
         # Load small arrays into RAM; build per-grid-item scalar lookups to avoid
         # expensive random chunk reads into large H5 datasets at __getitem__ time.
         with h5py.File(local_grid_file, 'r') as f:
@@ -85,28 +140,6 @@ class LocalGridDataset(Dataset):
             self._valid_indices = np.where(self._hand_vert_mask.any(axis=-1))[0]
         print(f"Valid grid items (hand inside grid): {len(self._valid_indices)} / {self.n_grids} "
               f"({100 * len(self._valid_indices) / self.n_grids:.1f}%)")
-        # Per-worker H5 handle, initialized lazily in __getitem__ to avoid
-        # multiprocessing fork issues and repeated open/close overhead.
-        self._h5_handle = None
-
-        hand_cse_sd = torch.load(cfg.get('hand_cse_path', 'data/misc/hand_cse.ckpt'), weights_only=True)['state_dict']
-        self.hand_cse = hand_cse_sd['embedding_tensor'].detach().cpu().numpy()
-        self.mano_faces = hand_cse_sd['cano_faces'].detach().cpu().numpy()
-        self.obj_info = {}
-        self.close_mano_faces = np.load(osp.join('data', 'misc', 'closed_mano_r_faces.npy'), allow_pickle=True)
-        ## Downsample data
-        # self.idx2sample = self.idx2sample[::cfg.downsample_rate[split], :]
-        coords = torch.tensor([(i, j, k) for i in range(self.kernel_size)
-                                    for j in range(self.kernel_size)
-                                    for k in range(self.kernel_size)], dtype=torch.float32) 
-        normalized_coords = 2 * coords - (self.kernel_size - 1)
-        self.normalized_coords = (normalized_coords / (self.kernel_size - 1))
-
-        self._load_data()
-        if self.downsample_rate > 1:
-            self.rh_data = self.sample_frames(self.rh_data)
-            self.object_data = self.sample_frames(self.object_data)
-            self.frame_names = self.sample_frames(self.frame_names)
 
     def sample_frames(self, data):
         if type(data) is dict:
@@ -126,39 +159,27 @@ class LocalGridDataset(Dataset):
     def __getitem__(self, idx):
         # Remap through valid indices so only grid items with hand inside the grid are exposed.
         raw_idx = self._valid_indices[idx]
-        # Lazily open the H5 file once per worker process, keeping it open for all subsequent reads.
-        if self._h5_handle is None:
-            self._h5_handle = h5py.File(self.local_grid_file, 'r')
-        grid_data_raw = self._h5_handle
-
         # sample_idx, point_idx = self.idx2sample[idx].tolist()
         point_idx, sample_idx = self._grid_sample_idx[raw_idx]
-        # frame_name = grid_data_raw['frame_names'][sample_idx].decode('utf-8')
-
-        hand_vert_mask = self._hand_vert_mask[raw_idx]   # (778,) bool, preloaded
-        grid_mask = self._grid_mask[sample_idx]           # (n_pts,) bool, preloaded
-        # Convert unmasked point_idx to masked array index
-        # masked_point_idx = np.sum(grid_mask[:point_idx]).item()
-        # masked_point_idx = np.searchsorted(np.where(grid_mask)[0], point_idx)
-        grid_sdf = grid_data_raw['grid_sdf'][raw_idx]
-        grid_distance = grid_data_raw['grid_distance'][raw_idx]
-        ## TODO: do shape transformation for nn_face_idx and nn_point when saving data.
-        nn_face_idx = grid_data_raw['nn_face_idx'][raw_idx].reshape(self.kernel_size**3)
-        nn_point = grid_data_raw['nn_point'][raw_idx].reshape(self.kernel_size**3, 3)
 
         fname_path = self.frame_names[sample_idx].split('/')
         sbj_id = fname_path[2]
         obj_name = fname_path[3].split('_')[0]
-        obj_sample_pt = self.obj_info[obj_name]['samples'][grid_mask][point_idx] # 3
+        obj_samples = self.obj_info[obj_name]['samples']
+        if self.cache == 'all':
+            # point_idx indexes the grids kept for this frame
+            cano_sample_pt = obj_samples[self._grid_mask[sample_idx]][point_idx] # 3
+        else:
+            cano_sample_pt = obj_samples[point_idx]
         # obj_sample_normal = self.obj_info[obj_name]['sample_normals'][point_idx] # 3
         obj_rot = self.object_data['global_orient'][sample_idx]
         obj_trans = self.object_data['transl'][sample_idx]
-        
+
         objR = axis_angle_to_matrix(obj_rot).detach().cpu().numpy()
         if self.dataset_name == 'grab':
             objR = objR.T
         objt = obj_trans.detach().cpu().numpy()
-        obj_sample_pt = (objR @ obj_sample_pt.reshape(3, 1)).reshape(3) + objt
+        obj_sample_pt = (objR @ cano_sample_pt.reshape(3, 1)).reshape(3) + objt
         # obj_sample_normal = (objR @ obj_sample_normal.reshape(3, 1)).reshape(3)
 
         hdata = self.rh_data
@@ -168,6 +189,20 @@ class LocalGridDataset(Dataset):
                 th_trans=hdata['transl'][sample_idx][None, :])
         nhandV = handV[0].detach().cpu().numpy() - obj_sample_pt[np.newaxis, :]
         # nhandV = np.random.rand(778, 3)
+
+        if self.cache == 'point':
+            return self._get_point_item(obj_name, cano_sample_pt, objR, obj_sample_pt, obj_rot, obj_trans, nhandV)
+
+        # Lazily open the H5 file once per worker process, keeping it open for all subsequent reads.
+        if self._h5_handle is None:
+            self._h5_handle = h5py.File(self.local_grid_file, 'r')
+        grid_data_raw = self._h5_handle
+        hand_vert_mask = self._hand_vert_mask[raw_idx]   # (778,) bool, preloaded
+        grid_sdf = grid_data_raw['grid_sdf'][raw_idx]
+        grid_distance = grid_data_raw['grid_distance'][raw_idx]
+        ## TODO: do shape transformation for nn_face_idx and nn_point when saving data.
+        nn_face_idx = grid_data_raw['nn_face_idx'][raw_idx].reshape(self.kernel_size**3)
+        nn_point = grid_data_raw['nn_point'][raw_idx].reshape(self.kernel_size**3, 3)
 
         nn_point = nn_point - obj_sample_pt[np.newaxis, :]
 
@@ -213,4 +248,30 @@ class LocalGridDataset(Dataset):
                 }
 
         return sample
+
+    def _get_point_item(self, obj_name, cano_sample_pt, objR, obj_sample_pt, obj_rot, obj_trans, nhandV):
+        """
+        cache=point: everything except the hand-distance part of the grid, which
+        LocalGridDataModule computes for the whole batch on the GPU (gridContact, gridHandCSE,
+        face_idx, cse_weights).
+        """
+        if self._obj_sdf is None:
+            self._obj_sdf = {name: SDF(m['verts'], m['faces']) for name, m in self.simp_obj_mesh.items()}
+        # Object SDF at the grid points, queried in the canonical object frame (world = objR @ v + t),
+        # which gives the same values as the cached dump that transforms the mesh instead.
+        grid_offsets = self.normalized_coords.numpy().astype(np.float64) * self.grid_scale  # (K^3, 3)
+        cano_grid_pts = cano_sample_pt[np.newaxis, :] + grid_offsets @ objR
+        grid_sdf = -self._obj_sdf[obj_name](cano_grid_pts)
+        grid_sdf = torch.from_numpy(grid_sdf.reshape(self.kernel_size, self.kernel_size, self.kernel_size, 1)).float()
+        grid_sdf = grid_sdf / self.grid_scale / np.sqrt(3)  # Normalize SDF
+        return {
+            'gridSDF': grid_sdf,
+            'objSamplePt': obj_sample_pt,
+            'objRot': obj_rot,
+            'objTrans': obj_trans,
+            'nHandVerts': nhandV,
+            # Hand vertices inside the local volume (Chebyshev distance), as in calc_local_grid_all_pts_gpu
+            'handVertMask': np.abs(nhandV).max(axis=-1) < self.grid_scale,
+            'obj_name': obj_name,
+        }
 

@@ -14,8 +14,10 @@ from copy import deepcopy
 from multiprocessing.pool import Pool
 from pysdf import SDF
 
-from common.msdf.utils.msdf import calculate_contact_mask, calc_local_grid_all_pts_gpu
+from common.msdf.utils.msdf import calculate_contact_mask, calc_local_grid_all_pts_gpu, sample_grid_mask, calc_local_grid_batch_gpu
 from common.msdf.simplified_msdf import mesh2msdf
+from common.utils.geometry import GridDistanceToContact
+from common.dataset_utils.local_grid_dataset import CACHE_MODES, local_grid_cache_path
 from common.manopth.manopth.manolayer import ManoLayer
 import open3d as o3d
 
@@ -37,18 +39,36 @@ class LocalGridDataModule(LightningDataModule):
         kernel_size = self.cfg.msdf.kernel_size
         coords = torch.tensor([(i, j, k) for i in range(kernel_size)
                                     for j in range(kernel_size)
-                                    for k in range(kernel_size)], dtype=torch.float32) 
+                                    for k in range(kernel_size)], dtype=torch.float32)
         normalized_coords = 2 * coords - (kernel_size - 1)
         self.normalized_coords = (normalized_coords / (kernel_size - 1))
+
+        # cache=all: the full local grids are dumped to an H5 file once (prepare_data) and read per grid.
+        # cache=point: only the (point, frame) pairs with at least one hand vertex inside the local
+        # volume are cached; the hand part of each grid is computed on the GPU in on_after_batch_transfer,
+        # so the trainer receives the same batch in both modes.
+        self.cache = self.cfg.cache
+        if self.cache not in CACHE_MODES:
+            raise ValueError(f"data.cache must be one of {CACHE_MODES}, got {self.cache!r}")
+        if self.cache == 'point':
+            if self.cfg.use_noncontact_grids:
+                raise ValueError("data.cache=point stores only grids with the hand inside; "
+                                 "use data.cache=all for data.use_noncontact_grids=true.")
+            self.grid_dist_to_contact = GridDistanceToContact.from_config(self.cfg.msdf, method=self.cfg.msdf.contact_method)
+            self.mano_faces_t = self.mano_layer.th_faces.long()
+            self.hand_cse_t = torch.from_numpy(self.hand_cse).float()
 
     def prepare_data(self):
         """
         dump local training data to disk
         """
+        if self.cache == 'point':
+            self._prepare_points()
+            return
         data_cfg = deepcopy(self.cfg)
         for split in ['train', 'val', 'test']:
-            local_grid_dir = osp.join(self.preprocessed_dir, self.dataset_name, f'local_grid_{self.cfg.msdf.kernel_size}_{self.cfg.msdf.scale*1000:.1f}mm')
-            local_grid_file = osp.join(local_grid_dir, f'{split}.h5')
+            local_grid_file = local_grid_cache_path(self.cfg, split)
+            local_grid_dir = osp.dirname(local_grid_file)
             if not osp.exists(local_grid_file):
                 os.makedirs(local_grid_dir, exist_ok=True)
                 self.base_dataset = getattr(self.module, self.cfg.dataset_name.upper() + 'Dataset')(data_cfg, split, load_msdf=False, object_only=False)
@@ -242,6 +262,40 @@ class LocalGridDataModule(LightningDataModule):
 
                 print(f'Saved local grid data to {local_grid_file}')
 
+    def _prepare_points(self):
+        """
+        cache=point: for each frame, sample the object points (data.sample_rate) among those with at
+        least one hand vertex inside their local volume, and store the (point, frame) pairs. This fixes
+        the training set (and its size) up front; the grids themselves are computed during training.
+        """
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        scale = self.cfg.msdf.scale
+        for split in ['train', 'val', 'test']:
+            point_file = local_grid_cache_path(self.cfg, split)
+            if osp.exists(point_file):
+                continue
+            os.makedirs(osp.dirname(point_file), exist_ok=True)
+            base_dataset = getattr(self.module, self.cfg.dataset_name.upper() + 'Dataset')(
+                deepcopy(self.cfg), split, load_msdf=False, object_only=False)
+            loader = DataLoader(base_dataset, batch_size=64, shuffle=False, num_workers=8)
+            grid_sample_idx, n_near_total, frame_idx = [], 0, 0
+            for sample in tqdm(loader, desc=f"Sampling local grid points ({split})..."):
+                obj_samples = sample['objSamplePts'].to(device)  # (B, N, 3)
+                hand_verts = sample['handVerts'].to(device)      # (B, H, 3)
+                for i in range(obj_samples.shape[0]):
+                    # Chebyshev distance: is the hand vertex inside the point's local volume?
+                    ho_dist = torch.max(torch.abs(hand_verts[i][None, :, :] - obj_samples[i][:, None, :]), dim=-1)[0]
+                    near_mask = (ho_dist < scale).any(dim=1)  # (N,)
+                    n_near_total += int(near_mask.sum().item())
+                    point_idx = torch.where(sample_grid_mask(near_mask, self.cfg.sample_rate[split]))[0].cpu().numpy()
+                    grid_sample_idx.append(np.stack([point_idx, np.full_like(point_idx, frame_idx)], axis=-1))
+                    frame_idx += 1
+            grid_sample_idx = np.concatenate(grid_sample_idx, axis=0).astype(np.int32)
+            np.savez_compressed(point_file, grid_sample_idx=grid_sample_idx, n_frames=frame_idx)
+            print(f'{split}: {len(grid_sample_idx)} local grids from {frame_idx} frames '
+                  f'({n_near_total} points with the hand inside, sample rate {self.cfg.sample_rate[split]}). '
+                  f'Saved to {point_file}')
+
     def setup(self, stage: str):
         if stage == 'fit':
             self.train_set = self.dataset_class(self.cfg, 'train')
@@ -262,9 +316,52 @@ class LocalGridDataModule(LightningDataModule):
 
     def on_after_batch_transfer(self, batch, dataloader_idx):
         if isinstance(batch, dict):
-            return {k: v.float() if isinstance(v, torch.Tensor) and v.is_floating_point() else v for k, v in batch.items()}
+            batch = {k: v.float() if isinstance(v, torch.Tensor) and v.is_floating_point() else v for k, v in batch.items()}
+            if self.cache == 'point':
+                batch = self._complete_local_grids(batch)
+            return batch
         elif isinstance(batch, torch.Tensor) and batch.is_floating_point():
             return batch.float()
+        return batch
+
+    @torch.no_grad()
+    def _complete_local_grids(self, batch):
+        """
+        cache=point: compute the hand part of each local grid on the GPU, i.e. what the cache=all
+        dump stores (hand distance, nearest face and point) and LocalGridDataset derives from it.
+        """
+        K = self.cfg.msdf.kernel_size
+        n_hand_verts = batch['nHandVerts']  # (B, 778, 3), relative to the grid centre
+        device = n_hand_verts.device
+        B = n_hand_verts.shape[0]
+        faces = self.mano_faces_t.to(device)
+        grid_dist, nn_face_idx, nn_point = calc_local_grid_batch_gpu(
+            n_hand_verts, faces, self.normalized_coords.to(device), K, self.cfg.msdf.scale)
+        nn_face_idx = nn_face_idx.reshape(B, K ** 3)
+        nn_point = nn_point.reshape(B, K ** 3, 3)
+
+        # Barycentric weights of the nearest point on its triangle -> interpolated hand CSE
+        nn_vert_idx = faces[nn_face_idx]  # (B, K^3, 3)
+        face_verts = n_hand_verts[torch.arange(B, device=device)[:, None, None], nn_vert_idx]  # (B, K^3, 3, 3)
+        w = torch.linalg.solve_ex(face_verts.transpose(-1, -2), nn_point.unsqueeze(-1))[0]  # (B, K^3, 3, 1)
+        # Make sure weights are all positive and normalized
+        w = torch.nan_to_num(w, nan=0.0, posinf=0.0, neginf=0.0).clamp(0, 1)
+        w = w / (w.sum(dim=-2, keepdim=True) + 1e-8)
+        grid_hand_cse = (self.hand_cse_t.to(device)[nn_vert_idx] * w).sum(dim=-2).reshape(B, K, K, K, -1)
+
+        grid_contact = self.grid_dist_to_contact(grid_dist)  # (B, K, K, K, 1)
+        # Same as LocalGridDataset: no hand vertex inside -> zero contact, and zero CSE half of the time.
+        # Cached points always have the hand inside, so this only guards borderline float differences.
+        no_hand = ~batch['handVertMask'].any(dim=-1)
+        grid_contact[no_hand] = 0
+        grid_hand_cse[no_hand & (torch.rand(B, device=device) < 0.5)] = 0
+
+        batch.update({
+            'gridContact': grid_contact,
+            'gridHandCSE': grid_hand_cse,
+            'face_idx': nn_face_idx,
+            'cse_weights': w.squeeze(-1),
+        })
         return batch
 
 

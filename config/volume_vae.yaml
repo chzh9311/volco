@@ -1,9 +1,7 @@
 defaults:
-  - msdf: "64_4"
+  - msdf: "128_8"
   - data: grab_local_grid
-  # - ae: volume_vae_128latent_v2_gn
-  # - ae: volume_vae_128latent_v3_gn
-  - ae: volume_vae_64latent_v3_gn
+  - ae: volume_vae_128latent
   - _self_
 
 training_stage: "ae"

@@ -576,6 +576,79 @@ def nn_dist_to_mesh_gpu(points, hand_verts, faces):
     return distances, face_idx, closest_points
 
 
+def sample_grid_mask(near_mask, sample_rate=1, far_point_rate=0):
+    """
+    Pick the grid centres to keep, given which ones have hand vertices inside their local volume.
+
+    Args:
+        near_mask: (N,) bool, contact points with at least one hand vertex inside the grid
+        sample_rate: float, fraction of the near points to keep (drawn at random)
+        far_point_rate: float, number of far points (no hand vertex inside) to add, relative to
+                        the number of kept near points. They are negative samples for training.
+
+    Returns:
+        grid_mask: (N,) bool
+    """
+    N = near_mask.shape[0]
+    device = near_mask.device
+    n_near_points = int(near_mask.sum().item())
+
+    # Step 1: Calculate number of masked points after sampling
+    n_sampled_near = int(n_near_points * sample_rate)
+
+    # Step 2: Calculate number of far points to add
+    n_far_points = int(n_sampled_near * far_point_rate)
+
+    # Step 3: Sample points from the initial mask
+    if sample_rate < 1.0 and n_sampled_near > 0:
+        near_indices = torch.where(near_mask)[0]
+        sampled_indices = near_indices[torch.randperm(n_near_points, device=device)[:n_sampled_near]]
+        grid_mask = torch.zeros(N, dtype=torch.bool, device=device)
+        grid_mask[sampled_indices] = True
+    else:
+        grid_mask = near_mask.clone()
+
+    # Step 4: Add far points to the mask
+    if far_point_rate > 0 and n_far_points > 0:
+        far_candidates = torch.where(~near_mask)[0]
+        n_available_far = far_candidates.shape[0]
+        if n_available_far > 0:
+            n_far_points = min(n_far_points, n_available_far)
+            far_indices = far_candidates[torch.randperm(n_available_far, device=device)[:n_far_points]]
+            grid_mask[far_indices] = True
+
+    return grid_mask
+
+
+def calc_local_grid_batch_gpu(hand_verts, faces, normalized_coords, kernel_size, grid_scale):
+    """
+    Local grids of B independent (grid, hand) pairs in one Kaolin call. Each grid is centred at
+    the origin, so hand_verts must already be expressed relative to its grid centre.
+
+    Args:
+        hand_verts: (B, V, 3) hand vertices relative to each grid centre
+        faces: (F, 3) LongTensor, hand faces
+        normalized_coords: (K^3, 3) normalized grid coordinates
+        kernel_size: int, size of the cubic grid
+        grid_scale: float, scale of the grid
+
+    Returns:
+        grid_distance: (B, K, K, K, 1) unsigned distance from each grid point to the hand surface
+        nn_face_idx: (B, K, K, K) index of the nearest hand face
+        nn_point: (B, K, K, K, 3) nearest point on the hand surface, relative to the grid centre
+    """
+    B = hand_verts.shape[0]
+    K = kernel_size
+    hand_verts = hand_verts.float()
+    grid_points = (normalized_coords.float() * grid_scale)[None].expand(B, -1, -1).contiguous()  # (B, K^3, 3)
+    face_verts = index_vertices_by_faces(hand_verts, faces)  # (B, F, 3, 3)
+    sq_dist, face_idx, _ = point_to_mesh_distance(grid_points, face_verts)  # (B, K^3), (B, K^3)
+    nearest_tri_verts = face_verts[torch.arange(B, device=hand_verts.device)[:, None], face_idx]  # (B, K^3, 3, 3)
+    nn_point = _project_points_to_triangles(grid_points.reshape(-1, 3), nearest_tri_verts.reshape(-1, 3, 3))
+    grid_distance = torch.sqrt(sq_dist.clamp(min=0))
+    return grid_distance.reshape(B, K, K, K, 1), face_idx.reshape(B, K, K, K), nn_point.reshape(B, K, K, K, 3)
+
+
 def calc_local_grid_all_pts_gpu(contact_points, normalized_coords, hand_verts, faces, kernel_size, grid_scale,
                                 apply_grid_mask=True, sample_rate=1, far_point_rate=0):
     """
@@ -629,30 +702,7 @@ def calc_local_grid_all_pts_gpu(contact_points, normalized_coords, hand_verts, f
                 torch.empty(0, K, K, K, 3, device=device),
             )
 
-        # Step 1: Calculate number of masked points after sampling
-        n_sampled_near = int(n_near_points * sample_rate)
-
-        # Step 2: Calculate number of far points to add
-        n_far_points = int(n_sampled_near * far_point_rate)
-
-        # Step 3: Sample points from the initial mask
-        if sample_rate < 1.0 and n_sampled_near > 0:
-            near_indices = torch.where(grid_mask_initial)[0]
-            sampled_indices = near_indices[torch.randperm(n_near_points, device=device)[:n_sampled_near]]
-            grid_mask = torch.zeros(N, dtype=torch.bool, device=device)
-            grid_mask[sampled_indices] = True
-        else:
-            grid_mask = grid_mask_initial.clone()
-
-        # Step 4: Add far points to the mask
-        if far_point_rate > 0 and n_far_points > 0:
-            far_candidates = torch.where(~grid_mask_initial)[0]
-            n_available_far = far_candidates.shape[0]
-            if n_available_far > 0:
-                n_far_points = min(n_far_points, n_available_far)
-                far_indices = far_candidates[torch.randperm(n_available_far, device=device)[:n_far_points]]
-                grid_mask[far_indices] = True
-
+        grid_mask = sample_grid_mask(grid_mask_initial, sample_rate, far_point_rate)
         M = grid_mask.sum().item()
 
         # Build grid points for active contact points
