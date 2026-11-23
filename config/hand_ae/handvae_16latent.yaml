@@ -6,4 +6,4 @@ feat_dim: 1024
 
 mano_root: ${data.mano_root}
 
-pretrained_weight: logs/checkpoints/handvae/${hand_ae.latent_dim}latent/best.ckpt
+pretrained_weight: logs/checkpoints/hand_vae/latent${hand_ae.latent_dim}.ckpt
