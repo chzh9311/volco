@@ -27,7 +27,7 @@ train:
     # consistency_contact_loss: 5.0
     # consistency_cse_loss: 1.0
   
-  resume_ckpt: # logs/checkpoints/mlcdiff/with_hand_guide/newae_v2/last.ckpt
+  resume_ckpt:
 
 seed: 1987
 

@@ -1,5 +1,5 @@
 defaults:
-  - msdf: sparse
+  - msdf: "128_8"
   - data: grab_multi_contact
   - hand_ae: handvae_16latent
   - _self_

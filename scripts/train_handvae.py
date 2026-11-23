@@ -5,10 +5,8 @@ from omegaconf import OmegaConf
 import torch
 import datetime
 from common.dataset_utils.datamodules import HOIDatasetModule
-from common.dataset_utils.hoi4d_dataset import HOI4DHandDataModule
-from common.model.vae.handvae import HandVAE, HandVAETrainer
+from common.model.handvae import HandVAE, HandVAETrainer
 from lightning.pytorch.callbacks import ModelCheckpoint
-# from common.model.gridvqvae.gridvqvae import GRIDVQVAE
 
 # Register OmegaConf resolvers for arithmetic operations
 OmegaConf.register_new_resolver("add", lambda x, y: x + y, replace=True)
@@ -44,7 +42,6 @@ def main(cfg):
     )
 
     data_module = HOIDatasetModule(cfg)
-    # data_module = HOI4DHandDataModule(cfg)
     if cfg.run_phase == 'train':
         pl_trainer = HandVAETrainer(model, cfg)
         trainer = L.Trainer(**cfg.trainer, logger=logger, callbacks=[checkpoint_callback])
