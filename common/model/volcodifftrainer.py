@@ -21,7 +21,7 @@ from common.model.handobject import HandObject, recover_hand_verts_from_contact
 from common.model.hand_cse.hand_cse import HandCSE
 from common.utils.geometry import GridDistanceToContact
 from common.utils.physics import StableLoss
-from common.utils.vis import o3dmesh, o3dmesh_from_trimesh, geom_to_img, visualize_recon_hand_w_object, visualize_grid_contact, geom_to_video_o3d
+from common.utils.vis import o3dmesh, o3dmesh_from_trimesh, geom_to_img, visualize_recon_hand_w_object, visualize_grid_contact, geom_to_video
 from common.msdf.utils.msdf import get_grid, calc_local_grid_all_pts_gpu
 from common.evaluation.eval_fns import calculate_metrics, calc_diversity
 from einops import rearrange
@@ -701,8 +701,9 @@ class VolCoDiffTrainer(L.LightningModule):
                 if init_ho is not None:
                     panels.append([g for g in init_ho.get_vis_geoms(idx=vis_idx) if g['name'] in ['hand', 'object']])
 
-                geom_to_video_o3d(panels, osp.join(vid_dir, f'sample_{vis_idx:02d}.mp4'), w=vid_side, h=vid_side,
-                                  n_frames=self.cfg.test.get('vis_video_frames', 90))
+                geom_to_video(panels, osp.join(vid_dir, f'sample_{vis_idx:02d}.mp4'), w=vid_side, h=vid_side,
+                              n_frames=self.cfg.test.get('vis_video_frames', 90),
+                              backend=self.cfg.get('vis_backend', 'open3d'))
 
         if hasattr(self.logger, 'experiment') and not self.debug:
             metric_row = [

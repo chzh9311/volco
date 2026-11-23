@@ -547,14 +547,217 @@ def geom_to_img(vis_geoms, w, h, scale=0.07, half_range=None, concat_axis=1, poi
     return ret_img
 
 
+VIS_BACKENDS = ('open3d', 'pytorch3d', 'matplotlib')
+
+# Open3D legacy-visualizer defaults the PyTorch3D renderer reproduces
+_O3D_FOV = 60.0           # vertical field of view (deg)
+_O3D_POINT_SIZE = 5.0     # point diameter (px)
+_O3D_MESH_COLOR = 0.7     # mesh colour without vertex colours
+_LINE_POINT_SIZE = 2.0    # LineSets are drawn as dense points of this diameter (px)
+_LINE_SAMPLES = 32        # points per line segment
+
+
+def _p3d_scene(vis_geoms):
+    """
+    Flatten a list of Open3D geometries (or dicts with key 'geometry') into numpy arrays for PyTorch3D:
+    one triangle soup (verts, faces, vertex colours) and one coloured point set (point clouds plus
+    sampled LineSets, each with its pixel size). Transparency is ignored, as in the Open3D legacy
+    visualizer.
+    """
+    verts, faces, vcols, unlit, pts, pcols, psizes = [], [], [], [], [], [], []
+    n_verts = 0
+    for g in vis_geoms:
+        g = g['geometry'] if isinstance(g, dict) else g
+        if isinstance(g, o3d.geometry.TriangleMesh):
+            v, f = np.asarray(g.vertices), np.asarray(g.triangles)
+            if len(v) == 0 or len(f) == 0:
+                continue
+            verts.append(v)
+            faces.append(f + n_verts)
+            vcols.append(np.asarray(g.vertex_colors) if g.has_vertex_colors()
+                         else np.full((len(v), 3), _O3D_MESH_COLOR))
+            # Open3D draws meshes without vertex normals (e.g. contact boxes) unlit
+            unlit.append(np.full(len(f), not g.has_vertex_normals()))
+            n_verts += len(v)
+        elif isinstance(g, o3d.geometry.PointCloud):
+            p = np.asarray(g.points)
+            if len(p) == 0:
+                continue
+            pts.append(p)
+            pcols.append(np.asarray(g.colors) if g.has_colors() else np.full((len(p), 3), 0.5))
+            psizes.append(np.full(len(p), _O3D_POINT_SIZE))
+        elif isinstance(g, o3d.geometry.LineSet):
+            p, l = np.asarray(g.points), np.asarray(g.lines)
+            if len(p) == 0 or len(l) == 0:
+                continue
+            t = np.linspace(0, 1, _LINE_SAMPLES)[None, :, None]
+            pts.append((p[l[:, 0], None] * (1 - t) + p[l[:, 1], None] * t).reshape(-1, 3))
+            c = np.asarray(g.colors) if g.has_colors() else np.zeros((len(l), 3))
+            pcols.append(np.repeat(c, _LINE_SAMPLES, axis=0))
+            psizes.append(np.full(len(l) * _LINE_SAMPLES, _LINE_POINT_SIZE))
+
+    def _cat(arrs, shape, dtype=np.float32):
+        return np.concatenate(arrs).astype(dtype) if arrs else np.zeros(shape, dtype=dtype)
+    return dict(verts=_cat(verts, (0, 3)), faces=_cat(faces, (0, 3), np.int64), vcols=_cat(vcols, (0, 3)),
+                unlit=_cat(unlit, (0,), bool),
+                pts=_cat(pts, (0, 3)), pcols=_cat(pcols, (0, 3)), psizes=_cat(psizes, (0,)))
+
+
+def _p3d_render(scenes, cam_params, w, h, device=None, chunk_size=32):
+    """
+    Render (scene, camera) pairs on the GPU in batches of chunk_size.
+
+    scenes: list of dicts from _p3d_scene
+    cam_params: list of (scene_idx, eye (3,), lookat (3,), up (3,)) tuples, one per output image
+    Returns: uint8 numpy array (len(cam_params), h, w, 3), white background.
+    """
+    from pytorch3d.structures import Meshes, Pointclouds
+    from pytorch3d.renderer import (FoVPerspectiveCameras, look_at_view_transform, PointLights,
+                                    MeshRasterizer, RasterizationSettings, HardFlatShader, BlendParams,
+                                    TexturesVertex, PointsRasterizer, PointsRasterizationSettings)
+
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    t = lambda a, dtype=torch.float32: torch.as_tensor(a, dtype=dtype, device=device)
+
+    meshes = Meshes(verts=[t(s['verts']) for s in scenes], faces=[t(s['faces'], torch.int64) for s in scenes],
+                    textures=TexturesVertex([t(s['vcols']) for s in scenes]))
+    has_pts = any(len(s['pts']) for s in scenes)
+    if has_pts:
+        # Per-point radius in NDC units (the shorter image side spans [-1, 1])
+        clouds = Pointclouds(points=[t(s['pts']) for s in scenes],
+                             features=[t(np.concatenate([s['pcols'], s['psizes'][:, None] / min(h, w)], axis=1))
+                                       for s in scenes])
+
+    # Smallest bins PyTorch3D allows (fewer than 22 per side) are ~2x faster than its default here;
+    # max_faces_per_bin covers whole scenes so no face is ever dropped. Back faces are culled as in Open3D.
+    mesh_raster = MeshRasterizer(raster_settings=RasterizationSettings(
+        image_size=(h, w), faces_per_pixel=1, bin_size=-(-max(h, w) // 21), cull_backfaces=True,
+        max_faces_per_bin=max(max(len(s['faces']) for s in scenes), 1)))
+    shader = HardFlatShader(device=device, blend_params=BlendParams(background_color=(1.0, 1.0, 1.0)))
+
+    out = []
+    for c0 in range(0, len(cam_params), chunk_size):
+        chunk = cam_params[c0:c0 + chunk_size]
+        idx = [c[0] for c in chunk]
+        eye = t(np.stack([c[1] for c in chunk]))
+        R, T = look_at_view_transform(eye=eye, at=t(np.stack([c[2] for c in chunk])),
+                                      up=t(np.stack([c[3] for c in chunk])), device=device)
+        # znear/zfar scaled to the camera distance (PyTorch3D's default znear=1 would clip the scene)
+        dist = (eye - t(np.stack([c[2] for c in chunk]))).norm(dim=-1)
+        cameras = FoVPerspectiveCameras(R=R, T=T, fov=_O3D_FOV, znear=dist * 0.01, zfar=dist * 100, device=device)
+        # Headlight, like Open3D's default lighting
+        lights = PointLights(location=eye, ambient_color=((0.55,) * 3,), diffuse_color=((0.55,) * 3,),
+                             specular_color=((0.1,) * 3,), device=device)
+
+        chunk_meshes = meshes[idx]
+        fragments = mesh_raster(chunk_meshes, cameras=cameras)
+        img = shader(fragments, chunk_meshes, cameras=cameras, lights=lights)[..., :3]
+        if any(scenes[i]['unlit'].any() for i in set(idx)):
+            pix_face = fragments.pix_to_face[..., 0]  # packed face index, -1 for background
+            face_unlit = torch.cat([t(scenes[i]['unlit'], torch.bool) for i in idx])
+            unlit_pix = (pix_face >= 0) & face_unlit[pix_face.clamp(min=0)]
+            texels = chunk_meshes.sample_textures(fragments)[..., 0, :3]
+            img = torch.where(unlit_pix[..., None], texels, img)
+
+        chunk_clouds = clouds[idx] if has_pts else None
+        if chunk_clouds is not None and chunk_clouds.num_points_per_cloud().sum() > 0:
+            # Points are unlit and depth-composited against the meshes
+            feats = chunk_clouds.features_packed()  # rasterizer indices refer to packed points
+            radius = chunk_clouds.features_padded()[..., 3]  # (N, P)
+            pts_raster = PointsRasterizer(cameras=cameras, raster_settings=PointsRasterizationSettings(
+                image_size=(h, w), radius=radius, points_per_pixel=1, bin_size=0))  # few points: naive is fastest
+            pfrag = pts_raster(chunk_clouds)
+            p_idx, p_z = pfrag.idx[..., 0], pfrag.zbuf[..., 0]
+            m_z = fragments.zbuf[..., 0]
+            use_pt = (p_idx >= 0) & ((m_z < 0) | (p_z < m_z))
+            img = torch.where(use_pt[..., None], feats[p_idx.clamp(min=0), :3], img)
+
+        out.append((img.clamp(0, 1) * 255).round().to(torch.uint8).cpu().numpy())  # uint8: 4x less to copy
+    return np.concatenate(out, axis=0)
+
+
+def _orbit_eye(lookat, max_extent, zoom, elev_deg, azim_rad):
+    """Camera position as set by Open3D's ViewControl (set_front/set_lookat/set_zoom, fov 60 deg)."""
+    elev = np.radians(elev_deg)
+    front = np.array([np.cos(elev) * np.cos(azim_rad), np.cos(elev) * np.sin(azim_rad), np.sin(elev)])
+    dist = zoom * max_extent / np.tan(np.radians(_O3D_FOV) / 2)
+    return np.asarray(lookat, dtype=np.float64) + front * dist
+
+
+def _scene_bbox(scene):
+    p = np.concatenate([scene['verts'], scene['pts']])
+    if len(p) == 0:
+        return np.zeros(3), 1.0
+    lo, hi = p.min(0), p.max(0)
+    return (lo + hi) / 2, max(float((hi - lo).max()), 1e-6)
+
+
+def geom_to_img_p3d(vis_geoms, w, h, scale=1, concat_axis=1, device=None):
+    """
+    PyTorch3D counterpart of geom_to_img_o3d: the same 4 azimuth views (elevation 30 deg, looking at
+    the origin, zoom=scale), rendered in one batch on the GPU without a window.
+
+    Returns: float32 numpy array in [0, 1], shape (H, W*4, 3) or (H*4, W, 3)
+    """
+    scene = _p3d_scene(vis_geoms)
+    _, max_extent = _scene_bbox(scene)
+    up = np.array([0.0, 0.0, 1.0])
+    lookat = np.zeros(3)
+    cams = [(0, _orbit_eye(lookat, max_extent, scale, 30.0, np.pi * i / 2 + np.pi / 6), lookat, up)
+            for i in range(4)]
+    imgs = _p3d_render([scene], cams, w, h, device=device)
+    return np.concatenate(list(imgs), axis=concat_axis).astype(np.float32) / 255
+
+
+def geom_to_video_p3d(panels, out_path, w, h, n_frames=90, fps=30, elev=30.0, scale=0.9, device=None,
+                      chunk_size=32):
+    """
+    PyTorch3D counterpart of geom_to_video_o3d: each panel orbits its own bbox centre for one full
+    turn and the panels are placed side by side. All frames of all panels are rendered in batches on
+    the GPU without a window.
+    """
+    import imageio
+
+    scenes = [_p3d_scene(p) for p in panels]
+    up = np.array([0.0, 0.0, 1.0])
+    cams = []
+    for pi, scene in enumerate(scenes):
+        lookat, max_extent = _scene_bbox(scene)
+        for azim in np.linspace(0, 2 * np.pi, n_frames, endpoint=False):
+            cams.append((pi, _orbit_eye(lookat, max_extent, scale, elev, azim), lookat, up))
+    imgs = _p3d_render(scenes, cams, w, h, device=device, chunk_size=chunk_size)
+    imgs = imgs.reshape(len(panels), n_frames, h, w, 3)
+
+    os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
+    writer = imageio.get_writer(out_path, fps=fps, codec='libx264', quality=8, macro_block_size=16)
+    for i in range(n_frames):
+        writer.append_data(np.concatenate(list(imgs[:, i]), axis=1))
+    writer.close()
+
+
 def geom_to_img_unified(vis_geoms, w, h, scale=1, concat_axis=1, backend='open3d'):
     """
-    Unified rendering wrapper.  backend='open3d' uses geom_to_img_o3d (hardware
-    renderer); backend='matplotlib' uses geom_to_img (software renderer).
+    Unified rendering wrapper. backend='open3d' uses geom_to_img_o3d (hardware renderer, needs a
+    display); backend='pytorch3d' uses geom_to_img_p3d (GPU, headless, same views as open3d);
+    backend='matplotlib' uses geom_to_img (software renderer).
     """
     if backend == 'matplotlib':
         return geom_to_img(vis_geoms, w=w, h=h, scale=scale, concat_axis=concat_axis)
-    return geom_to_img_o3d(vis_geoms, w=w, h=h, scale=scale, concat_axis=concat_axis)
+    if backend == 'pytorch3d':
+        return geom_to_img_p3d(vis_geoms, w=w, h=h, scale=scale, concat_axis=concat_axis)
+    if backend == 'open3d':
+        return geom_to_img_o3d(vis_geoms, w=w, h=h, scale=scale, concat_axis=concat_axis)
+    raise ValueError(f"Unknown vis backend '{backend}', expected one of {VIS_BACKENDS}")
+
+
+def geom_to_video(panels, out_path, w, h, n_frames=90, fps=30, elev=30.0, scale=0.9, backend='open3d'):
+    """Turntable video of side-by-side panels with backend 'open3d' (needs a display) or 'pytorch3d'."""
+    if backend == 'pytorch3d':
+        return geom_to_video_p3d(panels, out_path, w, h, n_frames=n_frames, fps=fps, elev=elev, scale=scale)
+    if backend == 'open3d':
+        return geom_to_video_o3d(panels, out_path, w, h, n_frames=n_frames, fps=fps, elev=elev, scale=scale)
+    raise ValueError(f"Video rendering supports backends 'open3d' and 'pytorch3d', got '{backend}'")
 
 
 def vis_nn_bps(hand_mesh, bps, nn_idx):

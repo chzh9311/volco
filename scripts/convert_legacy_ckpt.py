@@ -17,7 +17,7 @@ import os.path as osp
 import torch
 
 OLD_PREFIX, NEW_PREFIX = 'grid_ae.', 'volume_vae.'
-OLD_NAME, NEW_NAME = 'GRIDAE', 'VolumeVAE'
+OLD_NAME, NEW_NAME = 'GRIDAEResidualv2', 'VolumeVAEResidual'
 
 
 def convert(ckpt):

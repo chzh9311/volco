@@ -1,10 +1,7 @@
 defaults:
   - msdf: "128_8"
-  # - msdf: "64_4"
   - data: grab_multi_contact
-  # - ae: volume_vae_128latent_v2
-  # - ae: volume_vae_64latent_v2
-  - ae: volume_vae_256latent_v2
+  - ae: volume_vae_128latent
   - hand_ae: handvae_16latent
   - generator: dual_ldm
   - pose_optimizer: hybrid
@@ -82,14 +79,11 @@ physics:
 
 run_phase: train
 test_gt: false
-ckpt_path: "Random"
+ckpt_path: ${generator.checkpoint_path}
 optimizer: adamw
 
 debug: true
-vis_backend: open3d  # open3d (hardware) or matplotlib (software)
-pose_optimizer:
-  w_repulsive: 0.4
-  contact_th: 0.05
+vis_backend: pytorch3d  # open3d (hardware, needs a display), pytorch3d (GPU, headless) or matplotlib (software, images only)
 
 hydra:
   job:

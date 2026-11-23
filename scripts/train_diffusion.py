@@ -19,7 +19,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 
 OmegaConf.register_new_resolver("add", lambda x, y: x + y, replace=True)
 OmegaConf.register_new_resolver("power", lambda x, y: x ** y, replace=True)
-@hydra.main(version_base=None, config_path="../config", config_name="mlcdiff")
+@hydra.main(version_base=None, config_path="../config", config_name="volcodiff_128_8")
 def main(cfg):
     # Set seed for reproducibility FIRST
     # Set matmul precision for better performance on Tensor Cores
@@ -47,7 +47,7 @@ def main(cfg):
     else:
         import wandb
         logger = WandbLogger(name=exp_name,
-                             project='LG3DContact',
+                             project='VolCo',
                              log_model=True, save_dir='logs/wandb_logs')
     ckpt_dir = logger.log_dir
 
@@ -111,7 +111,7 @@ def main(cfg):
         else:
             sd = torch.load(cfg.ckpt_path, map_location='cpu', weights_only=False)['state_dict']
             print('total keys in ckpt:', len(sd.keys()))
-            load_pl_ckpt(volume_vae, sd, prefix='grid_ae.')
+            load_pl_ckpt(volume_vae, sd, prefix='volume_vae.')
             load_pl_ckpt(model, sd, prefix='model.')
             # Without dual diffusion the trainer does not register hand_ae as a submodule,
             # so those checkpoints carry no 'hand_ae.' keys. Fall back to the hand VAE's
