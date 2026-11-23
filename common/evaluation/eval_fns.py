@@ -325,6 +325,19 @@ def pene_depth(obj_mesh, hand_verts):
 
     return max_depth, result_distance, penetr_vert_ids
 
+def init_eval_worker():
+    """
+    Initializer for the multiprocessing.Pool that runs parallel_calculate_metrics.
+
+    Forked workers inherit the parent's thread pools (torch/OpenMP/MKL, ~20-40 threads each), so a
+    pool of 16 workers would run hundreds of busy threads on the CPU cores and become far slower than
+    running serially. Each worker is limited to one thread; the pool provides the parallelism.
+    """
+    from threadpoolctl import threadpool_limits
+    torch.set_num_threads(1)
+    threadpool_limits(1)
+
+
 def calculate_metrics(param_list, pool=None, metrics=[], reduction='mean'):
     for p in param_list:
         p["metrics"] = metrics

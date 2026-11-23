@@ -23,7 +23,7 @@ from common.utils.geometry import GridDistanceToContact
 from common.utils.physics import StableLoss
 from common.utils.vis import o3dmesh, o3dmesh_from_trimesh, geom_to_img, visualize_recon_hand_w_object, visualize_grid_contact, geom_to_video
 from common.msdf.utils.msdf import get_grid, calc_local_grid_all_pts_gpu
-from common.evaluation.eval_fns import calculate_metrics, calc_diversity
+from common.evaluation.eval_fns import calculate_metrics, calc_diversity, init_eval_worker
 from einops import rearrange
 
 
@@ -88,7 +88,7 @@ class VolCoDiffTrainer(L.LightningModule):
             ## contact-only checkpoints hold just volume_vae and model.
             object.__setattr__(self, 'hand_ae', hand_ae)
         self.hand_ae.eval().requires_grad_(False)
-        self.pool = None # Pool(processes=min(self.cfg.test.batch_size, 16))
+        self.pool = Pool(processes=min(self.cfg.test.batch_size, 16), initializer=init_eval_worker)
 
     def transfer_batch_to_device(self, batch, device, dataloader_idx):
         batch = super().transfer_batch_to_device(batch, device, dataloader_idx)
