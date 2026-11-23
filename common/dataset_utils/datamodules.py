@@ -1,5 +1,6 @@
 import os
 import os.path as osp
+import shutil
 import importlib
 import numpy as np
 import torch
@@ -18,8 +19,43 @@ from common.msdf.utils.msdf import calculate_contact_mask, calc_local_grid_all_p
 from common.msdf.simplified_msdf import mesh2msdf
 from common.utils.geometry import GridDistanceToContact
 from common.dataset_utils.local_grid_dataset import CACHE_MODES, local_grid_cache_path
+from common.dataset_utils.hoi_dataset import obj_hull_dir
 from common.manopth.manopth.manolayer import ManoLayer
 import open3d as o3d
+
+
+def load_dataset_obj_info(cfg, dataset_class):
+    """Object meshes ({name: {'verts', 'faces', ...}}) of the dataset, as loaded by its dataset class."""
+    if cfg.dataset_name == 'ho3d':
+        return dataset_class.load_mesh_info(cfg.obj_model_path, n_samples=cfg.object_sample)
+    return dataset_class.load_mesh_info(cfg.dataset_path)
+
+
+def prepare_obj_hulls(cfg, obj_info, threshold=0.05):
+    """
+    Decompose each object mesh into convex hulls with CoACD for the physics simulation metric, saved as
+    {preprocessed_dir}/{dataset_name}/obj_hulls/{obj_name}/hull_{i}.stl. Objects whose folder already
+    exists are skipped, so an interrupted run resumes where it stopped.
+    """
+    import coacd
+
+    out_dir = obj_hull_dir(cfg)
+    todo = [k for k in obj_info if not osp.isdir(osp.join(out_dir, k))]
+    if not todo:
+        return
+    os.makedirs(out_dir, exist_ok=True)
+    coacd.set_log_level('error')
+    for obj_name in tqdm(todo, desc='Decomposing object meshes into convex hulls'):
+        mesh = coacd.Mesh(np.asarray(obj_info[obj_name]['verts']), np.asarray(obj_info[obj_name]['faces']))
+        hulls = coacd.run_coacd(mesh, threshold=threshold)
+        # Write to a temporary folder first so that a partially written object is never taken as done
+        tmp_dir = osp.join(out_dir, f'.{obj_name}.tmp')
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        os.makedirs(tmp_dir)
+        for i, (verts, faces) in enumerate(hulls):
+            trimesh.Trimesh(verts, faces).export(osp.join(tmp_dir, f'hull_{i}.stl'))
+        os.replace(tmp_dir, osp.join(out_dir, obj_name))
+    print(f'Saved convex hulls of {len(todo)} objects to {out_dir}')
 
 class LocalGridDataModule(LightningDataModule):
     def __init__(self, cfg):
@@ -62,6 +98,9 @@ class LocalGridDataModule(LightningDataModule):
         """
         dump local training data to disk
         """
+        # The base dataset used below loads the objects' convex hulls
+        base_class = getattr(self.module, self.cfg.dataset_name.upper() + 'Dataset')
+        prepare_obj_hulls(self.cfg, load_dataset_obj_info(self.cfg, base_class))
         if self.cache == 'point':
             self._prepare_points()
             return
@@ -391,12 +430,10 @@ class HOIDatasetModule(LightningDataModule):
 
     def prepare_data(self):
         """
-        Dump precalculated variables, mainly M-SDF
+        Dump precalculated variables, mainly M-SDF, and the objects' convex hulls for simulation
         """
-        if self.cfg.dataset_name == 'ho3d':
-            obj_info = self.dataset_class.load_mesh_info(self.cfg.obj_model_path, n_samples=self.cfg.object_sample)
-        else:
-            obj_info = self.dataset_class.load_mesh_info(self.data_dir)
+        obj_info = load_dataset_obj_info(self.cfg, self.dataset_class)
+        prepare_obj_hulls(self.cfg, obj_info)
         for k, v in obj_info.items():
             mesh = trimesh.Trimesh(v['verts'], v['faces'], process=False)
             if 'msdf' in self.cfg and self.load_msdf:

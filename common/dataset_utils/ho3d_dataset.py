@@ -18,7 +18,7 @@ from lightning import LightningDataModule
 from copy import copy
 import math
 import cv2
-from .hoi_dataset import BaseHOIDataset
+from .hoi_dataset import BaseHOIDataset, load_obj_hulls
 from mano.webuser.smpl_handpca_wrapper_HAND_only import load_model
 # from manopth.manolayer import ManoLayer
 
@@ -92,11 +92,7 @@ class HO3DDataset(BaseHOIDataset):
 
         self.obj_hulls = {}
         for obj_name in obj_names:
-            hulls = []
-            hull_path = osp.join(self.obj_dir, 'obj_hulls', obj_name)
-            for i in range(len(os.listdir(hull_path))):
-                hulls.append(trimesh.load(osp.join(hull_path, f'hull_{i}.stl')))
-            self.obj_hulls[obj_name] = hulls
+            self.obj_hulls[obj_name] = load_obj_hulls(self.obj_hull_dir, obj_name)
 
         self.rh_data = None
         self.object_data = None

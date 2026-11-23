@@ -2,6 +2,7 @@ import numpy as np
 from copy import deepcopy
 import trimesh
 import torch
+import os
 import os.path as osp
 from torch.utils.data import Dataset
 from scipy.spatial.transform import Rotation
@@ -19,13 +20,27 @@ def get_kine_parent(idx):
 
 kinetree = {'Index': [0, 1, 2, 3, 17], 'Middle': [0, 4, 5, 6, 18], 'Little': [0, 10, 11, 12, 20],
           'Ring': [0, 7, 8, 9, 19], 'Thumb': [0, 13, 14, 15, 16]}
-    
+
+
+def obj_hull_dir(cfg):
+    """Directory of the objects' convex decompositions (<dir>/<obj_name>/hull_{i}.stl) used for simulation."""
+    return osp.join(cfg.get('preprocessed_dir', 'data/preprocessed'), cfg.dataset_name, 'obj_hulls')
+
+
+def load_obj_hulls(hull_dir, obj_name):
+    obj_hull_path = osp.join(hull_dir, obj_name)
+    if not osp.isdir(obj_hull_path):
+        raise FileNotFoundError(f"Missing convex hulls {obj_hull_path}. Please run the datamodule's prepare_data() first.")
+    n_hulls = len([f for f in os.listdir(obj_hull_path) if f.startswith('hull_') and f.endswith('.stl')])
+    return [trimesh.load(osp.join(obj_hull_path, f'hull_{i}.stl')) for i in range(n_hulls)]
+
 
 class BaseHOIDataset(Dataset):
     def __init__(self, cfg, split, load_msdf=False, load_grid_contact=False, object_only=False):
         super(BaseHOIDataset, self).__init__()
         self.data_dir = cfg.dataset_path
         self.preprocessed_dir = cfg.get('preprocessed_dir', 'data/preprocessed')
+        self.obj_hull_dir = obj_hull_dir(cfg)
         self.downsample_rate = cfg.downsample_rate[split]
         self.split = split
         self.object_only = object_only

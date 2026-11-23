@@ -21,7 +21,7 @@ from scipy.spatial.transform import Rotation
 
 from common.manopth.manopth.manolayer import ManoLayer
 from common.utils.geometry import make_watertight
-from .hoi_dataset import BaseHOIDataset
+from .hoi_dataset import BaseHOIDataset, load_obj_hulls
 from .local_grid_dataset import LocalGridDataset
 
 jointsMapManoToSimple = [0,
@@ -200,12 +200,7 @@ class GRABDataset(BaseHOIDataset):
         # self.obj_mass = {}
         self.obj_model = {}
         for obj_name in self.obj_info.keys():
-            hulls = []
-            hull_path = osp.join(self.data_dir, 'obj_hulls', obj_name)
-            for i in range(len(os.listdir(hull_path))):
-                hulls.append(trimesh.load(osp.join(hull_path, f'hull_{i}.stl')))
-
-            self.obj_hulls[obj_name] = hulls
+            self.obj_hulls[obj_name] = load_obj_hulls(self.obj_hull_dir, obj_name)
             obj_model = trimesh.Trimesh(self.obj_info[obj_name]['verts'], self.obj_info[obj_name]['faces'])
             self.obj_model[obj_name] = obj_model
 
