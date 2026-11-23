@@ -1,5 +1,8 @@
 # Volumetric Contact
 
+[![Project Page](https://img.shields.io/badge/Project-Page-brightgreen)](https://chzh9311.github.io/volco_project)
+[![Paper PDF](https://img.shields.io/badge/Paper-PDF-orange)](https://arxiv.org/pdf/2610.10197)
+
 This is the official implementation of the NeurIPS 2026 paper "VolCo: Volumetric Contact for High-Fidelity Human Grasp Generation".
 
 ![](docs/teaser.png)
