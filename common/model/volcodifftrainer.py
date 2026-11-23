@@ -938,11 +938,15 @@ class VolCoDiffTrainer(L.LightningModule):
             "Entropy": entropy.item(), "Cluster Size": cluster_size.item(),
             "Canonical Entropy": entropy_2.item(), "Canonical Cluster Size": cluster_size_2.item(),
         })
+        print('Final test metrics:')
+        for k, v in final_metrics.items():
+            print(f'  {k}: {v:.4f}')
         if not self.debug:
             wandb.log(final_metrics, commit=False)
             wandb.log({'test/results': self.test_images_table})
 
         for k, v in self.cache_results.items():
+            os.makedirs(osp.dirname(self._cache_path(k)), exist_ok=True)
             with open(self._cache_path(k), 'wb') as f:
                 pickle.dump(v, f)
 

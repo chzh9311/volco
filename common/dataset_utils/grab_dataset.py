@@ -21,7 +21,7 @@ from scipy.spatial.transform import Rotation
 
 from common.manopth.manopth.manolayer import ManoLayer
 from common.utils.geometry import make_watertight
-from .hoi_dataset import BaseHOIDataset, load_obj_hulls
+from .hoi_dataset import BaseHOIDataset, load_obj_hulls, simp_obj_mesh_path
 from .local_grid_dataset import LocalGridDataset
 
 jointsMapManoToSimple = [0,
@@ -192,7 +192,7 @@ class GRABDataset(BaseHOIDataset):
             self.test_objects = train_objects_select
         # self.test_objects = train_objects_select ## to see if overfitting happens
 
-        with open(osp.join('data', 'preprocessed', 'grab', 'simplified_obj_mesh.pkl'), 'rb') as of:
+        with open(simp_obj_mesh_path(self.preprocessed_dir, 'grab'), 'rb') as of:
             self.simp_obj_mesh = pickle.load(of)
 
         ## Object hulls for simulation.
@@ -232,7 +232,7 @@ class GRABLocalGridDataset(LocalGridDataset):
 
     def _load_data(self):
         self.obj_info = GRABDataset.load_mesh_info(self.dataset_path, msdf_path=None)
-        with open(osp.join('data', 'preprocessed', 'grab', 'simplified_obj_mesh.pkl'), 'rb') as of:
+        with open(simp_obj_mesh_path(self.preprocessed_dir, 'grab'), 'rb') as of:
             self.simp_obj_mesh = pickle.load(of)
         
         self.ds = np.load(osp.join(self.dataset_path, self.split, f'grabnet_{self.split}.npz'), allow_pickle=True)

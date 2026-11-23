@@ -27,6 +27,11 @@ def obj_hull_dir(cfg):
     return osp.join(cfg.get('preprocessed_dir', 'data/preprocessed'), cfg.dataset_name, 'obj_hulls')
 
 
+def simp_obj_mesh_path(preprocessed_dir, dataset_name):
+    """Objects decimated for visualization and the VolumeVAE object SDF: {obj_name: {'verts', 'faces'}}."""
+    return osp.join(preprocessed_dir, dataset_name, 'simplified_obj_mesh.pkl')
+
+
 def load_obj_hulls(hull_dir, obj_name):
     obj_hull_path = osp.join(hull_dir, obj_name)
     if not osp.isdir(obj_hull_path):

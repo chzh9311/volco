@@ -43,7 +43,6 @@ pip install kaolin==0.18.0 -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/t
 # Remaining dependencies
 pip install -r requirements.txt
 pip install git+https://github.com/mattloper/chumpy        # needed to read the MANO model files
-pip install git+https://github.com/lixiny/manotorch
 ```
 
 All commands below are run from the repository root with the root on the Python path:
@@ -105,20 +104,22 @@ The convex hulls of different CoACD versions are not identical, so the simulatio
 
 ## Pretrained models
 
-You can download our pretrained model to reproduce the results in the paper:
+You can download our pretrained models from [Google Drive](https://drive.google.com/drive/folders/10NWFZ-ZpXl01WNU5OQ-288pCbnvNb0EX?usp=sharing). The drive is already organized as below; place it at `logs/checkpoints/`:
 
-| Model | Download | Place at |
-| --- | --- | --- |
-| VolumeVAE (128 volumes, 8³ grid) | [volume_vae/best_128_8.ckpt](TODO) | `logs/checkpoints/volume_vae/best_128_8.ckpt` |
-| HandVAE (16-d latent) | [hand_vae/latent16.ckpt](TODO) | `logs/checkpoints/hand_vae/latent16.ckpt` |
-| VolCoDiff (128 volumes, 8³ grid) | [volcodiff/best_128_8.ckpt](TODO) | `logs/checkpoints/volcodiff/best_128_8.ckpt` |
+```text
+logs/checkpoints/
+├── volume_vae/
+│   ├── best_128_8.ckpt     # VolumeVAE: 128 volumes, 8³ grid
+│   └── best_64_4.ckpt      # (optional) VolumeVAE: 64 volumes, 4³ grid
+├── hand_vae/
+│   └── latent16.ckpt       # HandVAE: 16-d hand latent
+└── volcodiff/
+    ├── best_128_8.ckpt     # VolCoDiff: 128 volumes, 8³ grid
+    └── best_64_4.ckpt      # (optional) VolCoDiff: 64 volumes, 4³ grid
+```
 
-Optionally, you can download the smaller models, which takes less memory at a cost of performance degredation:
-
-| Model | Download | Place at |
-| --- | --- | --- |
-| VolumeVAE (64 volumes, 4³ grid) | [volume_vae/best_64_4.ckpt](TODO) | `logs/checkpoints/volume_vae/best_64_4.ckpt` |
-| VolCoDiff (64 volumes, 4³ grid) | [volcodiff/best_64_4.ckpt](TODO) | `logs/checkpoints/volcodiff/best_64_4.ckpt` |
+- **VolCoDiff (128 volumes, 8³ grid):** `best_128_8.ckpt` files and `latent16.ckpt`. These are all you need to reproduce the main results.
+- **VolCoDiff-S (64 volumes, 4³ grid):** the two `best_64_4.ckpt` files are optional. This model uses less memory but performs worse, trained to study the effect of resolution. To run the model, use `--config-name volcodiff_64_4`.
 
 These are the default paths in the configs. A VolCoDiff checkpoint also contains the VolumeVAE and HandVAE weights it was trained with, so evaluation needs only the VolCoDiff checkpoint.
 
@@ -168,7 +169,7 @@ python scripts/train_diffusion.py \
 Generate grasps for the GRAB test objects and evaluate them:
 
 ```bash
-python scripts/train_diffusion.py run_phase=test trainer.devices=1 debug=false \
+python scripts/train_diffusion.py run_phase=test trainer.devices=1 \
     ckpt_path=logs/checkpoints/volcodiff/best_128_8.ckpt
 ```
 
@@ -187,9 +188,10 @@ For each test object, VolCoDiff samples `test.n_samples` (default 20) grasps; th
 **Results.**
 
 - The per-object average of each metric is printed after each object.
-- With `debug=false`, the final metrics over all objects (mean, std, min, max, plus diversity and inference time) are logged to W&B, together with a per-object table.
+- At the end, the final metrics over all objects (mean, std, min, max, plus diversity and inference time) are printed. With `debug=false` they are also logged to W&B, together with a per-object table.
 - A turntable video per grasp is written to `tmp/process_vid/`. It shows the hand recovered from the generated contact, the final hand, the contact volumes, and the hand sampled by VolCoDiff before fitting.
 - The generated hands are cached in `tmp/grab/`. Add `test.use_cache=true` to recompute the metrics from this cache without sampling again.
+- The simulation displacement could be slightly different from the paper due to different versions of CoACD and randomness in simulation.
 
 **Options.**
 

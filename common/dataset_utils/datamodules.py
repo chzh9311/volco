@@ -1,6 +1,7 @@
 import os
 import os.path as osp
 import shutil
+import pickle
 import importlib
 import numpy as np
 import torch
@@ -19,7 +20,7 @@ from common.msdf.utils.msdf import calculate_contact_mask, calc_local_grid_all_p
 from common.msdf.simplified_msdf import mesh2msdf
 from common.utils.geometry import GridDistanceToContact
 from common.dataset_utils.local_grid_dataset import CACHE_MODES, local_grid_cache_path
-from common.dataset_utils.hoi_dataset import obj_hull_dir
+from common.dataset_utils.hoi_dataset import obj_hull_dir, simp_obj_mesh_path
 from common.manopth.manopth.manolayer import ManoLayer
 import open3d as o3d
 
@@ -29,6 +30,31 @@ def load_dataset_obj_info(cfg, dataset_class):
     if cfg.dataset_name == 'ho3d':
         return dataset_class.load_mesh_info(cfg.obj_model_path, n_samples=cfg.object_sample)
     return dataset_class.load_mesh_info(cfg.dataset_path)
+
+
+def prepare_simplified_obj_meshes(cfg, n_faces=2000):
+    """
+    GRAB only: decimate the object meshes (quadric decimation to n_faces triangles) and save them to
+    {preprocessed_dir}/grab/simplified_obj_mesh.pkl. The GRAB datasets use them for visualization and
+    the VolumeVAE object SDF; HO-3D's YCB meshes are used as they are.
+    """
+    if cfg.dataset_name != 'grab':
+        return
+    out_path = simp_obj_mesh_path(cfg.get('preprocessed_dir', 'data/preprocessed'), cfg.dataset_name)
+    if osp.exists(out_path):
+        return
+    # Decimate the original meshes of obj_info.npy (without GRABDataset.load_mesh_info's camera fix)
+    obj_info = np.load(osp.join(cfg.dataset_path, 'obj_info.npy'), allow_pickle=True).item()
+    simp_obj_mesh = {}
+    for k, v in tqdm(obj_info.items(), desc='Simplifying object meshes'):
+        mesh = o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(np.asarray(v['verts'], dtype=np.float64)),
+                                         o3d.utility.Vector3iVector(np.asarray(v['faces'])))
+        mesh = mesh.simplify_quadric_decimation(target_number_of_triangles=n_faces)
+        simp_obj_mesh[k] = {'verts': np.asarray(mesh.vertices), 'faces': np.asarray(mesh.triangles)}
+    os.makedirs(osp.dirname(out_path), exist_ok=True)
+    with open(out_path, 'wb') as f:
+        pickle.dump(simp_obj_mesh, f)
+    print(f'Saved simplified object meshes to {out_path}')
 
 
 def prepare_obj_hulls(cfg, obj_info, threshold=0.05):
@@ -98,8 +124,9 @@ class LocalGridDataModule(LightningDataModule):
         """
         dump local training data to disk
         """
-        # The base dataset used below loads the objects' convex hulls
+        # The base dataset used below loads the simplified object meshes and the convex hulls
         base_class = getattr(self.module, self.cfg.dataset_name.upper() + 'Dataset')
+        prepare_simplified_obj_meshes(self.cfg)
         prepare_obj_hulls(self.cfg, load_dataset_obj_info(self.cfg, base_class))
         if self.cache == 'point':
             self._prepare_points()
@@ -432,6 +459,7 @@ class HOIDatasetModule(LightningDataModule):
         """
         Dump precalculated variables, mainly M-SDF, and the objects' convex hulls for simulation
         """
+        prepare_simplified_obj_meshes(self.cfg)
         obj_info = load_dataset_obj_info(self.cfg, self.dataset_class)
         prepare_obj_hulls(self.cfg, obj_info)
         for k, v in obj_info.items():
@@ -563,20 +591,6 @@ class HOIDatasetModule(LightningDataModule):
                 pool.close()
                 pool.join()
                 print(f'Saved hand grid contact data to {dataset_file}')
-    
-        # Simplified object meshes
-        # simp_obj_mesh_path = osp.join('data', 'preprocessed', 'simplified_obj_mesh.pkl')
-        # if not osp.exists(simp_obj_mesh_path):
-        #     simp_obj_mesh = {}
-        #     obj_info = np.load(osp.join(self.data_dir, 'obj_info.npy'), allow_pickle=True).item()
-        #     for k, v in obj_info.items():
-        #         simp_obj_mesh[k] = {'verts': [], 'faces': []}
-        #         mesh = o3dmesh(v['verts'], v['faces'])
-        #         mesh = mesh.simplify_quadric_decimation(target_number_of_triangles=self.cfg.n_simp_faces)
-        #         # mesh = trimesh.Trimesh(vertices=np.asarray(mesh.vertices), faces=np.asarray(mesh.triangles))
-        #         simp_obj_mesh[k] = {'verts': np.asarray(mesh.vertices), 'faces': np.asarray(mesh.triangles)}
-        #     with open(simp_obj_mesh_path, 'wb') as f:
-        #         pickle.dump(simp_obj_mesh, f)
 
     @staticmethod
     def _calc_hand_grid_contact(param):
