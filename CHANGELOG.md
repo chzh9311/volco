@@ -3,14 +3,23 @@
 
 
 <a name="r.1.0"></a>
-## [r.1.0] - 2026-10-07
+## [r.1.0] - 2026-11-23
 ### Bug Fixes
+- Fix the problem that parallel workers cannot accelerate.
+- config name changes
+- Update citation key
 - Remove more files
 
 ### Code Refactoring
+- Remove unused legacy files.
+- Fixed checkpoint legacy issues.
 - further rename and sanitization
 - Corrected legacy model names.
 - Removed unnecessary files for release.
+
+### Features
+- Add CoACD object hulls decomposition to prepare_data().
+- Allows fast preparation with points dumping only.
 
 
 <a name="pre-release-archive"></a>
